@@ -1,4 +1,17 @@
-.Rproj.user
+# Dados crus baixados (pesados; reprodutíveis pelos scripts)
+data-raw/
+
+# Arquivos grandes intermediários
+*.gpkg
+*.tif
+*.zip
+
+# R
 .Rhistory
 .RData
-.Ruserdata
+.Rproj.user/
+.Rapp.history
+
+# Sistema
+.DS_Store
+Thumbs.db
