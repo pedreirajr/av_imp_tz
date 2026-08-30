@@ -23,7 +23,7 @@
 #   data/poluicao_tropomi_anual.csv   (agregação anual, média dos meses)
 # =============================================================================
 
-source("R/00_setup.R")
+source("scripts_dados/00_setup.R")
 .load_geo()
 
 if (!requireNamespace("rgee", quietly = TRUE)) {

@@ -8,7 +8,7 @@
  * 4) Clique "RUN" em cada tarefa. Elas exportam CSVs para a pasta do Drive
  *    "tropomi_tarifazero".
  * 5) Baixe os CSVs do Drive para a pasta data-raw/gee/ do projeto e rode
- *    R/03b_consolidar_gee.R.
+ *    scripts_dados/03b_consolidar_gee.R.
  *
  * Saída de cada CSV: colunas code_muni, ano, mes, poluente, mean (mol/m²).
  *******************************************************************************/

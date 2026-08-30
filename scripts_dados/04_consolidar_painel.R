@@ -10,7 +10,7 @@
 #   data/painel_poluicao_anual.csv
 # =============================================================================
 
-source("R/00_setup.R")
+source("scripts_dados/00_setup.R")
 
 ler_se_existir <- function(path) {
   if (file.exists(path)) readr::read_csv(path, show_col_types = FALSE)

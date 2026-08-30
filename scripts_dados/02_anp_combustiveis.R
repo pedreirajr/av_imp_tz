@@ -17,7 +17,7 @@
 #   data/painel_combustivel_anual.csv       (formato largo)
 # =============================================================================
 
-source("R/00_setup.R")
+source("scripts_dados/00_setup.R")
 
 # Base e mapeamento produto -> (pasta, prefixo do arquivo)
 ANP_BASE <- paste0(

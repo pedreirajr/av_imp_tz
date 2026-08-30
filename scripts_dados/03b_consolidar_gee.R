@@ -11,7 +11,7 @@
 # Saídas:   data/poluicao_tropomi_mensal.csv  e  data/poluicao_tropomi_anual.csv
 # =============================================================================
 
-source("R/00_setup.R")
+source("scripts_dados/00_setup.R")
 
 csvs <- list.files(DIR_GEE_RAW, pattern = "^tropomi_.*\\.csv$", full.names = TRUE)
 if (length(csvs) == 0)

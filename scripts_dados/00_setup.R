@@ -2,7 +2,7 @@
 # 00_setup.R — Configuração, pacotes e parâmetros do projeto
 # Projeto Tarifa Zero / ANPET — coleta de desfechos (parte do Thomas)
 #
-# Carregue este script no início dos demais:  source("R/00_setup.R")
+# Carregue este script no início dos demais:  source("scripts_dados/00_setup.R")
 # =============================================================================
 
 # ---- Pacotes -----------------------------------------------------------------

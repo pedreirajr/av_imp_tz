@@ -28,7 +28,7 @@ Esta é a **parte do Thomas** da coleta:
 ## Estrutura
 
 ```
-R/
+scripts_dados/
   00_setup.R              # pacotes, parâmetros, cidades-alvo, helpers
   01_municipios_geobr.R   # malha municipal IBGE (geobr) -> lookup + geometrias
   02_anp_combustiveis.R   # vendas ANP por município -> CSV tidy + painel largo
@@ -43,10 +43,10 @@ data-raw/                 # arquivos crus baixados (gitignored, reprodutíveis)
 Ordem: `00 → 01 → 02 → 03 → 04`. Cada script carrega `00_setup.R`.
 
 ```r
-source("R/01_municipios_geobr.R")   # malha IBGE (gera o lookup usado pela ANP)
-source("R/02_anp_combustiveis.R")   # combustíveis (baixa 45 planilhas da ANP)
-source("R/03_tropomi_poluicao.R")   # poluição (Earth Engine) — ver abaixo
-source("R/04_consolidar_painel.R")  # painéis finais
+source("scripts_dados/01_municipios_geobr.R")   # malha IBGE (gera o lookup usado pela ANP)
+source("scripts_dados/02_anp_combustiveis.R")   # combustíveis (baixa 45 planilhas da ANP)
+source("scripts_dados/03_tropomi_poluicao.R")   # poluição (Earth Engine) — ver abaixo
+source("scripts_dados/04_consolidar_painel.R")  # painéis finais
 ```
 
 ### Earth Engine (script 03) — roda na sua máquina
@@ -68,7 +68,7 @@ alguns anos e validar a exportação para o Drive em poucos minutos, ex.:
 
 ```r
 Sys.setenv(EE_ANOS_TESTE = "2019")   # coleta só 2019; deixe vazio p/ a série completa
-source("R/03_tropomi_poluicao.R")
+source("scripts_dados/03_tropomi_poluicao.R")
 ```
 
 ## Saídas (em `data/`)

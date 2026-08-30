@@ -16,7 +16,7 @@
 #   3) somente o LOOKUP via API de localidades do IBGE — quando não há geometrias.
 # =============================================================================
 
-source("R/00_setup.R")
+source("scripts_dados/00_setup.R")
 .load_geo()
 
 # ---- Lookup via API do IBGE (sempre disponível; não depende do geobr) --------
