@@ -2,3 +2,9 @@
 .Rhistory
 .RData
 .Ruserdata
+
+# Dados (vão como assets do release, não no repositório)
+*.csv
+*.parquet
+*.xlsx
+*.rds
