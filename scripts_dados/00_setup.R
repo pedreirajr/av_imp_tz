@@ -8,7 +8,7 @@
 # ---- Pacotes -----------------------------------------------------------------
 # Instala o que faltar e carrega. `rgee` só é necessário para o script 03.
 .pkgs <- c(
-  "tibble", "dplyr", "tidyr", "readr", "readxl", "stringr", "purrr", "httr"
+  "tibble", "dplyr", "tidyr", "readr", "stringr", "purrr", "httr"
 )
 # Pacotes espaciais / Earth Engine (usados em 01 e 03)
 .pkgs_geo <- c("geobr", "sf")
@@ -24,7 +24,7 @@
 .install_if_missing(.pkgs)
 invisible(lapply(.pkgs, library, character.only = TRUE))
 
-# Carrega pacotes geográficos se já instalados (não obriga, p/ rodar só a ANP)
+# Carrega pacotes geográficos sob demanda para os scripts que usam geometria.
 .load_geo <- function() {
   .install_if_missing(.pkgs_geo)
   invisible(lapply(.pkgs_geo, library, character.only = TRUE))
@@ -33,25 +33,18 @@ invisible(lapply(.pkgs, library, character.only = TRUE))
 # ---- Caminhos ----------------------------------------------------------------
 DIR_DATA     <- "data"
 DIR_DATA_RAW <- "data-raw"
-DIR_ANP_RAW  <- file.path(DIR_DATA_RAW, "anp")
 DIR_GEE_RAW  <- file.path(DIR_DATA_RAW, "gee")
 
-for (d in c(DIR_DATA, DIR_DATA_RAW, DIR_ANP_RAW, DIR_GEE_RAW)) {
+for (d in c(DIR_DATA, DIR_DATA_RAW, DIR_GEE_RAW)) {
   if (!dir.exists(d)) dir.create(d, recursive = TRUE)
 }
 
 # ---- Parâmetros do estudo ----------------------------------------------------
-# Série histórica da ANP (consumo de combustíveis)
-ANOS_ANP <- 2010:2024
-
 # UFs das cidades tratadas (3) + substitutas (2) — usado como fallback de recorte
 UFS_ALVO <- c("GO", "SP", "PR", "SC", "MT")
 
 # TROPOMI (Sentinel-5P) disponível a partir de jul/2018
 TROPOMI_INICIO <- as.Date("2018-07-01")
-
-# Produtos ANP de interesse (rótulos podem variar entre arquivos; ver 02)
-PRODUTOS_ANP <- c("GASOLINA C", "ETANOL HIDRATADO", "OLEO DIESEL")
 
 # ---- Cidades do estudo (código IBGE 7 dígitos + data de implementação) -------
 # 3 tratadas + 2 substitutas. Datas conforme noticiário oficial das prefeituras.

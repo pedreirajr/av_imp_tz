@@ -6,8 +6,8 @@
 #                                 (necessário para o recorte zonal do TROPOMI, 03)
 #   data/municipios_lookup.csv  — chave code_muni <-> nome/UF (sem geometria)
 #
-# A tabela de lookup é usada para padronizar os códigos IBGE da ANP (02) e o
-# recorte zonal do TROPOMI (03).
+# A tabela de lookup é usada para padronizar os códigos IBGE do recorte zonal
+# do TROPOMI (03).
 #
 # Estratégia de obtenção (em cascata, para ser robusta a falhas do geobr):
 #   1) geobr::read_municipality()  — fonte preferida;
