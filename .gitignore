@@ -3,6 +3,9 @@
 .RData
 .Ruserdata
 
+# Segredos (token do GitHub p/ o piggyback etc.) - nunca versionar
+.Renviron
+
 # Dados (vão como assets do release, não no repositório)
 *.csv
 *.parquet
