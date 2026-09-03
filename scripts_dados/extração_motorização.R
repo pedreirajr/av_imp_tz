@@ -13,7 +13,7 @@ TABELA <- "`basedosdados.br_denatran_frota.municipio_tipo`"
 
 
 
-message("Consultando os tipos de veículo...")
+
 tipos <- read_sql(
   query = sprintf("
 SELECT DISTINCT tipo_veiculo
@@ -59,7 +59,7 @@ GROUP BY id_municipio, id_municipio_nome, sigla_uf, ano, mes
 ", colunas, TABELA, ANO_INICIAL)
 
 
-message("Baixando o painel já pivotado (pode levar alguns minutos)...")
+
 frota_wide <- read_sql(query = QUERY, billing_project_id = BILLING_ID)
 message(sprintf("  Linhas baixadas: %s", format(nrow(frota_wide), big.mark = ".", decimal.mark = ",")))
 
