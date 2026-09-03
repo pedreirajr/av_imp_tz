@@ -1,6 +1,0 @@
-# Copie este arquivo para ".Renviron" (na raiz do projeto) e preencha com
-# seu token de verdade. O ".Renviron" real está no .gitignore — nunca sobe
-# pro repositório.
-#
-# Gere o token em: https://github.com/settings/tokens (escopo "repo")
-GITHUB_PAT=seu_token_aqui

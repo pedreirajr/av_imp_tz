@@ -1,90 +1,91 @@
 library(basedosdados)
-library(dplyr)
-library(tidyr)
-library(readr)
-library(piggyback)
+library(arrow)
 
-# -----------------------------------------------------------------------
-# 1. Configuração
-# -----------------------------------------------------------------------
+
+
 BILLING_ID  <- "ictarifazero"  # ID do projeto no Google Cloud (billing)
 ANO_INICIAL <- 2006            # recorte na ORIGEM (query): últimos 20 anos
 
 REPO <- "pedreirajr/av_imp_tz" # repositório GitHub onde os assets são publicados
 TAG  <- "dados-motorizacao"    # tag da release usada pelo piggyback
 
-# Autenticação do piggyback: crie um arquivo `.Renviron` na raiz do projeto
-# (ele já está no .gitignore, então fica só na sua máquina) com a linha:
-#   GITHUB_PAT=seu_token_aqui
-# gerando o token em https://github.com/settings/tokens (escopo "repo").
-# Depois de criar/editar o .Renviron, reinicie a sessão do R.
+TABELA <- "`basedosdados.br_denatran_frota.municipio_tipo`"
 
-# -----------------------------------------------------------------------
-# 2. Query
-# -----------------------------------------------------------------------
+
+
+message("Consultando os tipos de veículo...")
+tipos <- read_sql(
+  query = sprintf("
+SELECT DISTINCT tipo_veiculo
+FROM %s
+WHERE ano >= %d
+  AND tipo_veiculo IS NOT NULL
+  AND tipo_veiculo != ''
+ORDER BY tipo_veiculo
+", TABELA, ANO_INICIAL),
+  billing_project_id = BILLING_ID
+)$tipo_veiculo
+
+message("  ", paste(tipos, collapse = ", "))
+
+
+colunas <- paste(
+  sprintf(
+    "    SUM(CASE WHEN dados.tipo_veiculo = '%s' THEN dados.quantidade ELSE 0 END) AS %s",
+    gsub("'", "\\\\'", tipos),                 
+    gsub("[^a-z0-9_]", "_", tolower(tipos))    
+  ),
+  collapse = ",\n"
+)
+
 QUERY <- sprintf("
 SELECT
-    dados.ano          AS ano,
-    dados.mes          AS mes,
-    dados.sigla_uf     AS sigla_uf,
     dados.id_municipio AS id_municipio,
     diretorio_id_municipio.nome AS id_municipio_nome,
-    dados.tipo_veiculo AS tipo_veiculo,
-    dados.quantidade   AS quantidade
-FROM `basedosdados.br_denatran_frota.municipio_tipo` AS dados
+    dados.sigla_uf     AS sigla_uf,
+    dados.ano          AS ano,
+    dados.mes          AS mes,
+%s
+FROM %s AS dados
 LEFT JOIN (
     SELECT DISTINCT id_municipio, nome
     FROM `basedosdados.br_bd_diretorios_brasil.municipio`
 ) AS diretorio_id_municipio
     ON dados.id_municipio = diretorio_id_municipio.id_municipio
 WHERE dados.ano >= %d
-", ANO_INICIAL)
+  AND dados.tipo_veiculo IS NOT NULL
+  AND dados.tipo_veiculo != ''
+GROUP BY id_municipio, id_municipio_nome, sigla_uf, ano, mes
+", colunas, TABELA, ANO_INICIAL)
 
 
-message("Baixando dados do BigQuery (pode levar alguns minutos)...")
-frota_long <- read_sql(query = QUERY, billing_project_id = BILLING_ID)
-message(sprintf("  Linhas baixadas: %s", format(nrow(frota_long), big.mark = ".")))
+message("Baixando o painel já pivotado (pode levar alguns minutos)...")
+frota_wide <- read_sql(query = QUERY, billing_project_id = BILLING_ID)
+message(sprintf("  Linhas baixadas: %s", format(nrow(frota_wide), big.mark = ".", decimal.mark = ",")))
 
-# -----------------------------------------------------------------------
-# 4. Limpeza: remover registros sem tipo de veículo definido
-# -----------------------------------------------------------------------
-frota_long <- frota_long %>%
-  filter(!is.na(tipo_veiculo) & tipo_veiculo != "") %>%
-  mutate(quantidade = suppressWarnings(as.numeric(quantidade)))
 
-message("Tipos de veículo encontrados:")
-message("  ", paste(sort(unique(frota_long$tipo_veiculo)), collapse = ", "))
+frota_wide <- frota_wide[order(frota_wide$id_municipio, frota_wide$ano, frota_wide$mes), ]
 
-# -----------------------------------------------------------------------
-# 5. Pivotar: uma linha por município x mês, tipos em colunas
-#    (soma via group_by antes do pivot_wider evita o problema de
-#    list-column quando há combinações duplicadas de chave x tipo)
-# -----------------------------------------------------------------------
-frota_wide <- frota_long %>%
-  group_by(id_municipio, id_municipio_nome, sigla_uf, ano, mes, tipo_veiculo) %>%
-  summarise(quantidade = sum(quantidade, na.rm = TRUE), .groups = "drop") %>%
-  pivot_wider(names_from = tipo_veiculo, values_from = quantidade, values_fill = 0) %>%
-  arrange(id_municipio, ano, mes)
 
-# checagem de integridade
 if ("automovel" %in% names(frota_wide)) {
   message(sprintf("Soma total de automóveis: %s",
-                   format(sum(frota_wide$automovel), big.mark = ".", scientific = FALSE)))
+                   format(sum(frota_wide$automovel), big.mark = ".", decimal.mark = ",", scientific = FALSE)))
 }
 message(sprintf("Painel final: %s linhas, %d colunas",
-                 format(nrow(frota_wide), big.mark = "."), ncol(frota_wide)))
+                 format(nrow(frota_wide), big.mark = ".", decimal.mark = ","), ncol(frota_wide)))
 
 
-arquivo_saida <- "frota_mensal_municipio.csv"
-write_excel_csv(frota_wide, arquivo_saida)
+arquivo_saida <- "frota_mensal_municipio.parquet"
+write_parquet(frota_wide, arquivo_saida)
 message(sprintf("Arquivo salvo: %s (%s linhas)",
-                 arquivo_saida, format(nrow(frota_wide), big.mark = ".")))
+                 arquivo_saida, format(nrow(frota_wide), big.mark = ".", decimal.mark = ",")))
 
 
 
-releases <- pb_releases(repo = REPO)
-if (!(TAG %in% releases$tag_name)) {
-  pb_new_release(repo = REPO, tag = TAG)
-}
-pb_upload(file = arquivo_saida, repo = REPO, tag = TAG)
-message(sprintf("Publicado em https://github.com/%s/releases/tag/%s", REPO, TAG))
+# --- publicação no release via piggyback (desativada por enquanto) ---
+# releases <- pb_releases(repo = REPO)
+# if (!(TAG %in% releases$tag_name)) {
+#   pb_new_release(repo = REPO, tag = TAG)
+# }
+# pb_upload(file = arquivo_saida, repo = REPO, tag = TAG)
+# message(sprintf("Publicado em https://github.com/%s/releases/tag/%s", REPO, TAG))
