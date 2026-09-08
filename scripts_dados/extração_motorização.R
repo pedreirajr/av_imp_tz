@@ -4,7 +4,7 @@ library(piggyback)
 
 
 
-BILLING_ID  <- "ictarifazero"  # ID do projeto no Google Cloud (billing)
+BILLING_ID  <- "seuprojeto"  # <-- troque pelo ID do SEU projeto no Google Cloud (billing)
 ANO_INICIAL <- 2006            # recorte na ORIGEM (query): últimos 20 anos
 
 REPO <- "pedreirajr/av_imp_tz" # repositório GitHub onde os assets são publicados
@@ -83,7 +83,7 @@ message(sprintf("Arquivo salvo: %s (%s linhas)",
 
 
 
-# --- publicação do parquet como asset da release ---
+#publicação no release via piggyback 
 releases <- pb_releases(repo = REPO)
 if (!(TAG %in% releases$tag_name)) {
   pb_new_release(repo = REPO, tag = TAG)
