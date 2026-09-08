@@ -1,5 +1,6 @@
 library(basedosdados)
 library(arrow)
+library(piggyback)
 
 
 
@@ -7,7 +8,7 @@ BILLING_ID  <- "ictarifazero"  # ID do projeto no Google Cloud (billing)
 ANO_INICIAL <- 2006            # recorte na ORIGEM (query): últimos 20 anos
 
 REPO <- "pedreirajr/av_imp_tz" # repositório GitHub onde os assets são publicados
-TAG  <- "dados-motorizacao"    # tag da release usada pelo piggyback
+TAG  <- "data"                 # release "Dados do Projeto", onde a turma junta os dados
 
 TABELA <- "`basedosdados.br_denatran_frota.municipio_tipo`"
 
@@ -82,10 +83,10 @@ message(sprintf("Arquivo salvo: %s (%s linhas)",
 
 
 
-# --- publicação no release via piggyback (desativada por enquanto) ---
-# releases <- pb_releases(repo = REPO)
-# if (!(TAG %in% releases$tag_name)) {
-#   pb_new_release(repo = REPO, tag = TAG)
-# }
-# pb_upload(file = arquivo_saida, repo = REPO, tag = TAG)
-# message(sprintf("Publicado em https://github.com/%s/releases/tag/%s", REPO, TAG))
+# --- publicação do parquet como asset da release ---
+releases <- pb_releases(repo = REPO)
+if (!(TAG %in% releases$tag_name)) {
+  pb_new_release(repo = REPO, tag = TAG)
+}
+pb_upload(file = arquivo_saida, repo = REPO, tag = TAG, overwrite = TRUE)
+message(sprintf("Publicado em https://github.com/%s/releases/tag/%s", REPO, TAG))
