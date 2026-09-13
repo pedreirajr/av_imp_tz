@@ -10,7 +10,7 @@ dir.create(DIR_DATA_TRATADOS, recursive = TRUE, showWarnings = FALSE)
 
 # ---- 1. Referência oficial (via geobr, não via outro script do projeto) ------
 referencia_muni <- geobr::lookup_muni(year = 2022, name_muni = "all")
-# print(names(referencia_muni))  # confira os nomes reais antes de seguir
+
 
 referencia_muni <- referencia_muni |>
   dplyr::select(name_region, abbrev_state, code_muni, name_muni)  # complete com os nomes que aparecerem no print
@@ -29,7 +29,7 @@ tratar_arquivo <- function(tipo, nome_arquivo) {
   caminho_entrada <- file.path(DIR_DATA_RAW, nome_arquivo)
 
   # read_csv2: já assume ";" e decimal "," — resolve de cara o problema
-  # de formatação numérica que você teve no pandas
+  # de formatação numérica
   df <- readr::read_csv2(caminho_entrada)
 
   if (tipo == "padrao") {
