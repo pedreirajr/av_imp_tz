@@ -2,7 +2,3 @@
 .Rhistory
 .RData
 .Ruserdata
-scripts_dados/Dados_da_ANP/data-raw/
-scripts_dados/Dados_da_ANP/data/
-scripts_dados/Dados_da_ANP/parquet/
-scripts_dados/Dados_da_ANP/.RDataTmp
