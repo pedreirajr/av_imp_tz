@@ -2,3 +2,8 @@
 .Rhistory
 .RData
 .Ruserdata
+/.agents/
+/.claude/
+/.cursor/
+/.windsurf/
+/.specs/
