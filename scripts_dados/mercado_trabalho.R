@@ -1,11 +1,10 @@
 # Executar com Rscript scripts_dados/mercado_trabalho.R.
-# Dependências: PNADcIBGE, survey, datacaged, readr, readxl, arrow, piggyback, gh, httr.
+# Dependências: datacaged, readr, readxl, arrow, piggyback, gh, httr.
 # O CAGED antigo também requer 7-Zip. Arquivos de trabalho ficam fora do Git.
-# Saídas no release "data": PNADc trimestral e CAGED mensal, ambos para BR e 27 UFs.
+# Saída no release "data": CAGED mensal para BR e 27 UFs.
 # O CSV é usado até 100 MiB; acima desse tamanho, publica-se Parquet.
-# PNADc: ocupados, desocupados e força de trabalho são estimativas de pessoas;
-# taxa_desocupacao está em porcentagem. CAGED: competencia é AAAAMM da
-# movimentação; saldo = admissões - desligamentos quando há microdados íntegros.
+# CAGED: competencia é AAAAMM da movimentação; saldo = admissões - desligamentos
+# quando há microdados íntegros.
 #
 # Limitações do CAGED: na carga conferida em 2026-09, 22 arquivos mensais antigos
 # entre 2008-05 e 2014-12 estavam corrompidos. Nesses meses, a coluna "cobertura"
@@ -40,92 +39,6 @@ localizar_7zip <- function() {
     "C:/Program Files (x86)/7-Zip/7z.exe")
   candidatos <- candidatos[file.exists(candidatos)]
   if (length(candidatos)) candidatos[1] else ""
-}
-
-resumir_pnadc <- function(design, ano, trimestre) {
-  # VD4002: 1 = ocupado, 2 = desocupado. svytotal/svyby usam o desenho amostral
-  # devolvido pelo PNADcIBGE, incluindo os pesos de expansão.
-  design <- subset(design, !is.na(VD4002))
-  design <- stats::update(design,
-    ocupado = as.numeric(VD4002 == 1),
-    desocupado = as.numeric(VD4002 == 2)
-  )
-  brasil <- survey::svytotal(~ocupado + desocupado, design, na.rm = TRUE)
-  ufs <- survey::svyby(~ocupado + desocupado, ~UF, design,
-    survey::svytotal, na.rm = TRUE, keep.var = FALSE
-  )
-  names(ufs) <- sub("^statistic\\.", "", names(ufs))
-  totais <- data.frame(
-    uf = c("BR", sprintf("%02d", as.integer(as.character(ufs$UF)))),
-    ocupados = round(c(unname(coef(brasil)["ocupado"]), ufs$ocupado)),
-    desocupados = round(c(unname(coef(brasil)["desocupado"]), ufs$desocupado))
-  )
-  # As contagens publicadas são pessoas estimadas, arredondadas ao inteiro.
-  # A taxa usa essas mesmas contagens, mantendo a identidade da força de trabalho.
-  totais$forca_trabalho <- totais$ocupados + totais$desocupados
-  totais$taxa_desocupacao <- 100 * totais$desocupados / totais$forca_trabalho
-  data.frame(ano = ano, trimestre = trimestre, totais)
-}
-
-obter_pnadc <- function() {
-  suppressPackageStartupMessages(library("PNADcIBGE", character.only = TRUE))
-  cache <- tools::R_user_dir("av_imp_tz_pnadc", "cache")
-  dir.create(cache, recursive = TRUE, showWarnings = FALSE)
-  hoje <- as.POSIXlt(Sys.Date())
-  ultimo_completo <- (hoje$year + 1900) * 4 + (hoje$mon %/% 3)
-  periodos <- expand.grid(ano = 2012:(hoje$year + 1900), trimestre = 1:4)
-  periodos <- periodos[periodos$ano * 4 + periodos$trimestre <= ultimo_completo, ]
-  periodos <- periodos[order(periodos$ano, periodos$trimestre), ]
-
-  baixar <- function(ano, trimestre) {
-    pasta <- tempfile("pnadc_")
-    dir.create(pasta)
-    on.exit(unlink(pasta, recursive = TRUE), add = TRUE)
-    PNADcIBGE::get_pnadc(
-      year = ano, quarter = trimestre, vars = c("UF", "VD4002"),
-      labels = FALSE, deflator = FALSE, design = TRUE,
-      reload = FALSE, savedir = pasta
-    )
-  }
-  resumo <- function(ano, trimestre, atualizar = FALSE) {
-    # Guardar só o agregado evita baixar novamente todo o microdado trimestral.
-    arquivo <- file.path(cache, sprintf("%04dT%d.rds", ano, trimestre))
-    if (!atualizar && file.exists(arquivo) &&
-        difftime(Sys.time(), file.info(arquivo)$mtime, units = "days") < 7) {
-      salvo <- try(readRDS(arquivo), silent = TRUE)
-      if (!inherits(salvo, "try-error")) return(salvo)
-    }
-    design <- baixar(ano, trimestre)
-    if (is.null(design)) stop("Falha ao obter PNADc: ", ano, "T", trimestre)
-    resultado <- resumir_pnadc(design, ano, trimestre)
-    saveRDS(resultado, arquivo)
-    resultado
-  }
-  ultimo <- NULL
-  # O trimestre civil mais recente pode ainda não estar no FTP do IBGE.
-  # Procuramos o último publicado antes de exigir a sequência desde 2012.
-  for (i in rev(seq_len(nrow(periodos)))) {
-    tentativa <- try(resumo(periodos$ano[i], periodos$trimestre[i], atualizar = TRUE), silent = TRUE)
-    if (!inherits(tentativa, "try-error")) {
-      ultimo <- i
-      ultimo_resumo <- tentativa
-      rm(tentativa)
-      break
-    }
-  }
-  if (is.null(ultimo)) stop("Nenhum trimestre da PNADc disponível", call. = FALSE)
-
-  resultado <- vector("list", ultimo)
-  for (i in seq_len(ultimo)) {
-    if (i == ultimo) {
-      resultado[[i]] <- ultimo_resumo
-    } else {
-      resultado[[i]] <- resumo(periodos$ano[i], periodos$trimestre[i])
-    }
-  }
-  resultado <- do.call(rbind, resultado)
-  rownames(resultado) <- NULL
-  resultado
 }
 
 resumir_caged <- function(partes, ufs, inicio, corrompidos, saldos_sei,
@@ -482,8 +395,7 @@ executar <- function() {
       is.na(suppressWarnings(Sys.setlocale("LC_CTYPE", "Portuguese_Brazil.utf8")))) {
     stop("Locale UTF-8 indisponível para ler o CAGED antigo", call. = FALSE)
   }
-  pacotes <- c("PNADcIBGE", "survey", "datacaged", "readr", "readxl",
-    "arrow", "piggyback", "gh", "httr")
+  pacotes <- c("datacaged", "readr", "readxl", "arrow", "piggyback", "gh", "httr")
   faltam <- pacotes[!vapply(pacotes, requireNamespace, logical(1), quietly = TRUE)]
   if (length(faltam)) stop("Instale os pacotes: ", paste(faltam, collapse = ", "), call. = FALSE)
   if (!nzchar(gh::gh_token())) stop("Autenticação do GitHub ausente", call. = FALSE)
@@ -491,24 +403,17 @@ executar <- function() {
   if (!release_tag %in% releases$tag_name) stop("Release 'data' não encontrado", call. = FALSE)
 
   caged <- obter_caged()
-  pnadc <- obter_pnadc()
-  # Validar ambas as séries antes do primeiro upload evita publicar uma só.
-  validar_resultado(pnadc, c("ano", "trimestre"))
   validar_resultado(caged, "competencia")
   completos <- caged$cobertura == "microdados"
-  if (any(pnadc$forca_trabalho != pnadc$ocupados + pnadc$desocupados) ||
-      any(caged$saldo[completos] !=
-        caged$admissoes[completos] - caged$desligamentos[completos])) {
+  if (any(caged$saldo[completos] !=
+      caged$admissoes[completos] - caged$desligamentos[completos])) {
     stop("Inconsistência nos indicadores; publicação cancelada", call. = FALSE)
   }
 
   diretorio <- tempfile("assets_mercado_")
   dir.create(diretorio)
   on.exit(unlink(diretorio, recursive = TRUE), add = TRUE)
-  arquivos <- c(
-    preparar_asset(pnadc, "pnadc_desocupacao_trimestral", diretorio),
-    preparar_asset(caged, "caged_movimentacoes_mensais", diretorio)
-  )
+  arquivos <- preparar_asset(caged, "caged_movimentacoes_mensais", diretorio)
   invisible(lapply(arquivos, publicar))
   release <- gh::gh("GET /repos/:owner/:repo/releases/tags/:tag",
     owner = "pedreirajr", repo = "av_imp_tz", tag = release_tag)
