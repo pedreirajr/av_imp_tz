@@ -8,7 +8,14 @@
 .env
 
 # Dados (vão como assets do release, não no repositório)
+# a pasta data/ inteira, incluindo todas as subpastas (raw/, processed/, ...)
+data/
+
+# e também qualquer arquivo de dado solto fora dela
 *.csv
 *.parquet
 *.xlsx
+*.xls
+*.zip
 *.rds
+
