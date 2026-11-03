@@ -1,101 +1,285 @@
-# 1. Verificação e instalação de pacotes necessários no R
-.pkgs <- c("httr2", "jsonlite", "tidyr", "dplyr", "readr", "arrow", "piggyback", "geobr", "sf")
-.falta <- .pkgs[!vapply(.pkgs, requireNamespace, logical(1), quietly = TRUE)]
-if (length(.falta)) install.packages(.falta, repos = "https://cloud.r-project.org")
+# 1. VERIFICAÇÃO E INSTALAÇÃO DOS PACOTES
 
-invisible(lapply(.pkgs, library, character.only = TRUE))
+.pkgs <- c(
+  "httr2",
+  "jsonlite",
+  "tidyr",
+  "dplyr",
+  "readr",
+  "arrow",
+  "piggyback",
+  "geobr"
+)
 
-# 2. DOWNLOAD DOS DADOS (FIRJAN)
-url <- "https://firjan.com.br/data/files/E0/01/68/8E/F4D4991031B91689D8284EA8/dados-2025-final.json" 
+.falta <- .pkgs[
+  !vapply(.pkgs, requireNamespace, logical(1), quietly = TRUE)
+]
+
+if (length(.falta) > 0) {
+  install.packages(.falta, repos = "https://cloud.r-project.org")
+}
+
+invisible(
+  lapply(.pkgs, library, character.only = TRUE)
+)
+
+
+# 2. DOWNLOAD DOS DADOS DA FIRJAN
+
+# URL obtida na página do IFGF da Firjan.
+# Para localizar: abrir a página no navegador, pressionar F12,
+# acessar Network (Rede), filtrar por Fetch/XHR e recarregar.
+# Identificar a requisição que retorna o JSON dos indicadores.
+
+url <- paste0(
+  "https://firjan.com.br/data/files/",
+  "E0/01/68/8E/F4D4991031B91689D8284EA8/",
+  "dados-2025-final.json"
+)
 
 message("Baixando dados da Firjan...")
-req <- request(url) %>%
-  req_user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
+
+req <- request(url) |>
+  req_user_agent(
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+  )
 
 resp <- req_perform(req)
-raw_data <- resp_body_json(resp, simplifyVector = TRUE)
+
+raw_data <- resp_body_json(
+  resp,
+  simplifyVector = TRUE
+)
+
 
 # 3. PROCESSAMENTO E VALIDAÇÃO DA ESTRUTURA INICIAL
+
 if (is.list(raw_data) && "rows" %in% names(raw_data)) {
   df_wide <- as_tibble(raw_data$rows)
 } else {
   df_wide <- as_tibble(raw_data)
 }
 
-colunas_identificadoras <- c("Ano", "IdCidade", "UF", "Município", "Cidade")
-id_vars <- intersect(colunas_identificadoras, colnames(df_wide))
+stopifnot(
+  "Variáveis críticas ausentes na resposta JSON" =
+    all(c("Ano", "IdCidade") %in% names(df_wide))
+)
 
-stopifnot("Variáveis de identificação críticas ausentes na resposta JSON" = 
-            all(c("Ano", "IdCidade") %in% id_vars))
-
-# 4. ADEQUANDO COM OS DADOS DO GEOBR
-message("Buscando tabela de referência geográfica no geobr...")
-
-# Baixa e prepara a tabela do geobr
-muni_geo <- geobr::read_municipality(year = 2022, showProgress = FALSE) %>%
-  sf::st_drop_geometry() %>%
-  select(
-    code_muni_7  = code_muni,    # Código IBGE com 7 dígitos (ex: 3304557)
-    code_state,                  # Código do Estado (ex: 33)
-    abbrev_state,                # UF (ex: "RJ")
-    name_muni                    # Nome do Município
-  ) %>%
-  distinct(code_muni_7, .keep_all = TRUE) %>%
+# Mantém IdCidade para a exclusão de Boa Esperança do Norte.
+# Esta cidade foi oficialmente inaugarada em 2025. Dados do geobr são de 2022. Necessária a exclusão.
+df_wide <- df_wide |>
   mutate(
-    # Extrai os primeiros 6 dígitos e garante 6 caracteres de texto
-    code_muni_6 = sprintf("%06d", as.integer(substr(as.character(code_muni_7), 1, 6)))
+    IdCidade = as.character(IdCidade)
   )
 
-# Ajusta os nomes das colunas da Firjan e padroniza a chave de join
-df_wide <- df_wide %>%
-  rename_with(~ case_when(
-    .x == "Município" ~ "name_muni",
-    .x == "UF"        ~ "abbrev_state",
-    TRUE              ~ .x
-  )) %>%
-  # Formata o IdCidade da Firjan como texto de 6 dígitos com zeros à esquerda
-  mutate(code_muni_6 = sprintf("%06d", as.integer(IdCidade))) %>%
+# 4. ADEQUAÇÃO DOS DADOS COM O GEOBR
+
+message("Buscando tabela de referência geográfica no geobr...")
+
+muni_geo <- geobr::lookup_muni(
+  year = 2022,
+  name_muni = "all"
+) |>
+  select(
+    code_muni,
+    code_state,
+    abbrev_state,
+    name_muni
+  ) |>
+  distinct(code_muni, .keep_all = TRUE) |>
+  mutate(
+    code_muni = as.character(code_muni),
+    code_muni_6 = substr(code_muni, 1, 6)
+  )
+
+# Padroniza a chave da Firjan e realiza o join.
+# Nomes e UFs finais serão provenientes exclusivamente do geobr.
+
+df_wide <- df_wide |>
+  mutate(
+    code_muni_6 = sprintf(
+      "%06d",
+      as.integer(IdCidade)
+    )
+  ) |>
   left_join(
-    muni_geo %>% select(code_muni_6, code_muni = code_muni_7, code_state),
+    muni_geo |>
+      select(
+        code_muni_6,
+        code_muni,
+        code_state,
+        abbrev_state,
+        name_muni
+      ),
     by = "code_muni_6"
-  ) %>%
-  select(-code_muni_6)
+  )
 
-# Teste imediato de validação: verifica se code_muni foi preenchido
-message(sprintf("Municípios pareados com sucesso: %d de %d linhas", 
-                sum(!is.na(df_wide$code_muni)), 
-                nrow(df_wide)))
 
-# 5. TRANSFORMAÇÃO PARA FORMATO LONGO (PIVOT) E AJUSTE DE TIPAGEM
-df_long <- df_wide %>%
+# 5. EXCLUSÃO E VALIDAÇÃO DOS MUNICÍPIOS
+
+# Boa Esperança do Norte (MT), IdCidade 510183:
+
+df_wide <- df_wide |>
+  filter(IdCidade != "510183")
+
+# A execução trava se algum município não casar com o geobr.
+
+stopifnot(
+  "Existem municípios sem correspondência no geobr" =
+    !anyNA(df_wide$code_muni)
+)
+
+message(
+  sprintf(
+    "Municípios pareados com sucesso: %d de %d linhas",
+    sum(!is.na(df_wide$code_muni)),
+    nrow(df_wide)
+  )
+)
+
+# Remove identificadores originais da Firjan.
+df_wide <- df_wide |>
+  select(
+    -any_of(
+      c(
+        "Município",
+        "Cidade",
+        "UF",
+        "IdCidade",
+        "code_muni_6"
+      )
+    )
+  )
+
+
+# 6. TRANSFORMAÇÃO PARA FORMATO LONGO
+
+id_vars_padrao <- c(
+  "Ano",
+  "code_muni",
+  "name_muni",
+  "abbrev_state",
+  "code_state"
+)
+
+stopifnot(
+  "Variáveis identificadoras ausentes" =
+    all(id_vars_padrao %in% names(df_wide))
+)
+
+df_long <- df_wide |>
   pivot_longer(
     cols = -all_of(id_vars_padrao),
     names_to = "Indicador_ou_Ranking",
     values_to = "Valor",
-    values_transform = as.character
-  ) %>%
+    values_transform = list(Valor = as.character)
+  ) |>
   mutate(
-    Ano        = as.integer(Ano),
-    code_muni  = as.integer(code_muni),
+    Ano = as.integer(Ano),
+    code_muni = as.integer(code_muni),
     code_state = as.integer(code_state),
-    Valor_clean = na_if(Valor, "-"),
-    Valor      = as.numeric(Valor_clean),
-    tipo       = if_else(startsWith(Indicador_ou_Ranking, "Ranking"), "ranking", "valor"),
-    
-    Indicador_ou_Ranking = Indicador_ou_Ranking %>%
-      sub("^[0-9]+", "", .) %>%
-      sub("^Valor", "", .) %>%
-      sub("^Ranking", "", .) %>%
-      tolower()
-  ) %>%
-  select(-Valor_clean)
 
-message("\n--- Exemplo das primeiras linhas com as novas colunas ---")
-print(head(df_long %>% select(any_of(c("Ano", "code_muni", "code_state", "abbrev_state", "name_muni", "Indicador_ou_Ranking", "Valor"))), 15))
-message(sprintf("\nTotal de linhas extraídas: %s", format(nrow(df_long), big.mark = ".")))
+    # Tratamento do valor ausente utilizado pela Firjan.
+    Valor_clean = na_if(
+      Valor,
+      "Dados Indisponíveis"
+    ),
 
-# 6. EXPORTAÇÃO EM PARQUET DENTRO DE DIRETÓRIO TEMPORÁRIO
-parquet_path <- file.path(tempdir(), "firjan_dados_longo_completo.parquet")
+    # Conversão para valor numérico.
+    Valor = as.numeric(Valor_clean),
+
+    # Classificação dos indicadores e rankings.
+    tipo = case_when(
+      grepl(
+        "^Ranking.*Estadual",
+        Indicador_ou_Ranking,
+        ignore.case = TRUE
+      ) ~ "ranking_estadual",
+
+      grepl(
+        "^Ranking.*Nacional",
+        Indicador_ou_Ranking,
+        ignore.case = TRUE
+      ) ~ "ranking_nacional",
+
+      TRUE ~ "valor"
+    ),
+
+    # Limpeza do nome do indicador.
+    indicador = sub(
+      "^[0-9]+",
+      "",
+      Indicador_ou_Ranking
+    ),
+
+    indicador = sub(
+      "^(Ranking\\s*(Estadual|Nacional)|Ranking|Valor)\\s*",
+      "",
+      indicador,
+      ignore.case = TRUE
+    ),
+
+    indicador = tolower(indicador),
+
+    indicador = gsub(
+      "[^[:alnum:]]",
+      "",
+      indicador
+    )
+  ) |>
+  select(
+    -Indicador_ou_Ranking,
+    -Valor_clean
+  )
+
+
+# 7. VALIDAÇÃO DOS INDICADORES
+
+message("\n--- Indicadores encontrados ---")
+
+print(
+  df_long |>
+    distinct(indicador, tipo) |>
+    arrange(indicador, tipo)
+)
+
+message("\n--- Exemplo das primeiras linhas ---")
+
+print(
+  head(
+    df_long |>
+      select(
+        Ano,
+        code_muni,
+        code_state,
+        abbrev_state,
+        name_muni,
+        indicador,
+        tipo,
+        Valor
+      ),
+    15
+  )
+)
+
+message(
+  sprintf(
+    "\nTotal de linhas extraídas: %s",
+    format(
+      nrow(df_long),
+      big.mark = ".",
+      decimal.mark = ","
+    )
+  )
+)
+
+
+# 8. EXPORTAÇÃO EM PARQUET
+
+parquet_path <- file.path(
+  tempdir(),
+  "firjan_dados_longo_completo.parquet"
+)
 
 write_parquet(
   x = df_long,
@@ -103,13 +287,52 @@ write_parquet(
   compression = "snappy"
 )
 
-# 7. UPLOAD VIA PIGGYBACK E LIMPEZA
-pb_upload(
-  file = parquet_path,
-  repo = "pedreirajr/av_imp_tz",
-  tag  = "data",
-  overwrite = TRUE
-)
+message("Arquivo Parquet criado com sucesso.")
 
-unlink(parquet_path)
-message("Upload concluído com sucesso e arquivo local temporário removido.")
+# Verifica se o arquivo foi realmente criado.
+stopifnot(file.exists(parquet_path))
+
+
+# 9. UPLOAD VIA PIGGYBACK
+
+# O upload exige GITHUB_PAT configurado no ambiente R.
+# Não coloque o token diretamente no código versionado.
+
+if (!nzchar(Sys.getenv("GITHUB_PAT"))) {
+  stop(
+    "GITHUB_PAT não está configurado. ",
+    "Configure o token antes de executar o upload."
+  )
+}
+
+message("Iniciando upload para o GitHub...")
+
+tryCatch(
+  {
+    pb_upload(
+      file = parquet_path,
+      repo = "pedreirajr/av_imp_tz",
+      tag = "data",
+      overwrite = TRUE
+    )
+
+    # Só remove o arquivo após o upload não retornar erro.
+    unlink(parquet_path)
+
+    message(
+      "Upload concluído com sucesso e arquivo temporário removido."
+    )
+  },
+  error = function(e) {
+
+    message(
+      "Falha no upload: ",
+      conditionMessage(e)
+    )
+
+    message(
+      "O arquivo Parquet foi preservado em: ",
+      parquet_path
+    )
+  }
+)
