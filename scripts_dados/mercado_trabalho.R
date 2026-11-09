@@ -1,428 +1,431 @@
-# Executar com Rscript scripts_dados/mercado_trabalho.R.
-# Dependências: datacaged, readr, readxl, arrow, piggyback, gh, httr.
-# O CAGED antigo também requer 7-Zip. Arquivos de trabalho ficam fora do Git.
-# Saída no release "data": CAGED mensal para BR e 27 UFs.
-# O CSV é usado até 100 MiB; acima desse tamanho, publica-se Parquet.
-# CAGED: competencia é AAAAMM da movimentação; saldo = admissões - desligamentos
-# quando há microdados íntegros.
+# Executar da raiz: Rscript scripts_dados/mercado_trabalho.R
+# Gera localmente dados/caged_movimentacoes_mensais.parquet para revisão.
+# Publicar após revisão: Rscript scripts_dados/mercado_trabalho.R --publicar
+# Dependências: datacaged, dplyr, readr, data.table, curl, jsonlite, arrow; 7-Zip.
+# Publicação: piggyback, gh e httr, com autenticação do GitHub.
 #
-# Limitações do CAGED: na carga conferida em 2026-09, 22 arquivos mensais antigos
-# entre 2008-05 e 2014-12 estavam corrompidos. Nesses meses, a coluna "cobertura"
-# vale "saldo_apenas_SEI": o saldo vem da planilha pública da SEI/BA, somado aos
-# ajustes legíveis; admissões e desligamentos ficam vazios, pois o saldo não permite
-# recuperá-los. Se também faltar esse saldo, o mês é omitido com aviso.
-# Meses observados (ano: meses): 2008: 05, 08; 2009: 06, 08, 10, 11;
-# 2010: 05, 06, 07, 10, 12; 2011: 03; 2012: 05, 06, 08, 10;
-# 2013: 01, 10; 2014: 03, 05, 09, 12.
-# O ajuste CAGEDEST_AJUSTES_102010.7z também estava corrompido e é omitido.
-# "fontes_omitidas" registra essa lacuna em todo o CSV; isso NÃO significa que
-# cada linha foi afetada. Não é possível quantificar seu efeito sem o arquivo.
-# A série muda de metodologia em 2020 (coluna "serie"); compare os dois trechos
-# com essa quebra em mente. Consulte também os avisos da execução.
+# CAGED mensal desde 2010-01 por município, com códigos IBGE de sete dígitos
+# compatíveis com geobr. ano/mes referem-se à movimentação, inclusive nos ajustes,
+# FOR (fora do prazo) e EXC (exclusões). A metodologia muda em 2020 (serie).
+# O antigo usa a competência declarada do arquivo mensal, conforme seu layout.
+# Não há substituição pela SEI: saldo estadual não recupera movimentos municipais
+# e a planilha de agosto/2009 contém erros de escala nas UFs da região Norte.
+#
+# O CSV estadual anterior diferia da soma das 27 UFs em TODOS os meses do Novo
+# CAGED conferidos, por incluir UF não identificada apenas no Brasil. Agora esses
+# movimentos são preservados na saída: code_state=99, abbrev_state="NI", code_muni=NA.
+# Município não identificado com UF conhecida mantém a UF e code_muni=NA.
+# O dicionário CAGEDEST também usa UF + 9999 para município "Ignorado".
+# Não somar totais BR/UF à tabela: cada movimento aparece uma única vez.
+# Nas competências cobertas, ausência de linha municipal indica ausência de
+# movimentos nas fontes lidas. Competência omitida é lacuna, nunca zero.
+#
+# Conferência em 2026-11-09: o FTP recuperou 15 das 16 bases problemáticas.
+# Março/2011 e CAGEDEST_AJUSTES_102010.7z continuam corrompidos nas duas fontes.
+# Por decisão do usuário, omitir março/2011 INTEIRO, inclusive seus ajustes,
+# e o ajuste 2010-10. Este ajuste ausente pode alterar contagens e saldos de
+# competências anteriores; não é possível quantificar seu efeito sem o arquivo.
+# Toda nova fonte sem recuperação por integridade/ausência gera aviso explícito.
+# Erros de rede, layout, conteúdo e validação continuam interrompendo a carga.
+# FOR/EXC inexistentes em AMBAS as fontes são vazios; erro de rede não é ausência.
+# Fonte oficial e layouts: https://www.gov.br/trabalho-e-emprego/pt-br/
+# acesso-a-informacao/acoes-e-programas/programas-projetos-acoes-obras-e-atividades/
+# estatisticas-trabalho/microdados-rais-e-caged
 
 repo <- "pedreirajr/av_imp_tz"
 release_tag <- "data"
-limite_csv <- 100 * 1024^2
+inicio <- 201001L
 
-conferir_periodos <- function(valores, tipo) {
-  datas <- as.Date(sprintf("%04d-%02d-01", valores %/% 100, valores %% 100))
-  if (anyNA(datas) || !identical(sort(unique(datas)), seq(min(datas), max(datas), by = "month"))) {
-    stop("Competências ausentes ou inválidas em ", tipo, call. = FALSE)
+estados <- data.frame(
+  code_state = c(11:17, 21:29, 31:33, 35L, 41:43, 50:53, 99L),
+  abbrev_state = c("RO", "AC", "AM", "RR", "PA", "AP", "TO", "MA", "PI",
+    "CE", "RN", "PB", "PE", "AL", "SE", "BA", "MG", "ES", "RJ", "SP",
+    "PR", "SC", "RS", "MS", "MT", "GO", "DF", "NI")
+)
+
+conferir_periodos <- function(valores, primeiro = inicio) {
+  valores <- sort(unique(valores))
+  datas <- as.Date(sprintf("%04d-%02d-01", valores %/% 100, valores %% 100),
+    format = "%Y-%m-%d")
+  inicio_data <- as.Date(sprintf("%04d-%02d-01", primeiro %/% 100, primeiro %% 100))
+  if (!length(valores) || anyNA(datas) || any(valores != as.integer(valores))) {
+    stop("Competências ausentes ou inválidas", call. = FALSE)
+  }
+  if (!identical(datas, seq(inicio_data, max(datas), by = "month"))) {
+    stop("Competências ausentes ou inválidas desde ", primeiro, call. = FALSE)
   }
 }
 
 localizar_7zip <- function() {
-  disponiveis <- Sys.which(c("7z", "7za", "7zz"))
-  disponiveis <- unname(disponiveis[nzchar(disponiveis)])
+  disponiveis <- unname(Sys.which(c("7z", "7za", "7zz")))
+  disponiveis <- disponiveis[nzchar(disponiveis)]
   if (length(disponiveis)) return(disponiveis[1])
-  candidatos <- c("C:/Program Files/7-Zip/7z.exe",
-    "C:/Program Files (x86)/7-Zip/7z.exe")
+  candidatos <- c("C:/Program Files/7-Zip/7z.exe", "C:/Program Files (x86)/7-Zip/7z.exe")
   candidatos <- candidatos[file.exists(candidatos)]
   if (length(candidatos)) candidatos[1] else ""
 }
 
-resumir_caged <- function(partes, ufs, inicio, corrompidos, saldos_sei,
-                          fontes_omitidas = character()) {
-  dados <- do.call(rbind, partes)
-  # Sem microdado íntegro nem saldo alternativo, descartamos a competência
-  # corrompida inteira. A lacuna é avisada abaixo e permanece fora do CSV.
-  dados <- dados[dados$competencia >= inicio &
-    !dados$competencia %in% setdiff(corrompidos, unique(saldos_sei$competencia)), ]
-  if (!nrow(dados) || anyNA(dados) || any(!dados$uf %in% c(ufs, 99)) ||
-      any(dados$competencia %/% 100 < 1992)) {
-    stop("Movimentos inválidos no CAGED", call. = FALSE)
+nao_identificado <- function(x) {
+  # O layout antigo trunca a máscara "{ñ class}" à largura do campo (UF: "{ñ").
+  is.na(x) | x %in% c("", "0", "00", "000000", "0000000", "99", "999999", "9999999") |
+    grepl("^\\{", x)
+}
+
+municipio_nao_identificado <- function(x, uf) {
+  # Aba municipio: ftp://ftp.mtps.gov.br/pdet/microdados/CAGED/CAGEDEST_layout_Atualizado.xls
+  # Só reconhecer o código ignorado da própria UF; divergências continuam fatais.
+  nao_identificado(x) |
+    (uf %in% estados$code_state[estados$code_state != 99L] & x == paste0(uf, "9999"))
+}
+
+obter_municipios <- function() {
+  # O CAGED suprime o dígito verificador. Usar a tabela oficial evita calculá-lo
+  # incorretamente nos códigos IBGE com exceções históricas.
+  url <- "https://servicodados.ibge.gov.br/api/v1/localidades/municipios"
+  resposta <- curl::curl_fetch_memory(url)
+  if (resposta$status_code != 200L) stop("Cadastro IBGE indisponível", call. = FALSE)
+  cadastro <- jsonlite::fromJSON(rawToChar(resposta$content))
+  municipios <- data.frame(code_muni = as.integer(cadastro$id))
+  if (nrow(municipios) < 5500L || anyNA(municipios) ||
+      anyDuplicated(municipios) || any(nchar(municipios$code_muni) != 7L)) {
+    stop("Cadastro IBGE inválido", call. = FALSE)
   }
-  dados <- aggregate(cbind(admissoes, desligamentos) ~ competencia + uf, dados, sum)
-  competencia <- sort(unique(c(dados$competencia, saldos_sei$competencia)))
-  datas <- as.Date(sprintf("%04d-%02d-01", competencia %/% 100, competencia %% 100))
-  inicio_data <- as.Date(sprintf("%04d-%02d-01", inicio %/% 100, inicio %% 100))
-  ausentes <- setdiff(as.integer(format(seq(inicio_data, max(datas), by = "month"),
-    "%Y%m")), competencia)
-  if (length(ausentes)) warning("Competências CAGED sem microdados nem saldo: ",
-    paste(ausentes, collapse = ", "), call. = FALSE)
-  # UF 99 (não identificada) integra BR, mas não é publicada como UF. Por isso,
-  # em raros meses BR pode diferir da soma das 27 linhas estaduais.
-  brasil <- aggregate(cbind(admissoes, desligamentos) ~ competencia, dados, sum)
-  brasil <- merge(data.frame(competencia = competencia), brasil,
-    by = "competencia", all.x = TRUE)
-  brasil$admissoes[is.na(brasil$admissoes)] <- 0
-  brasil$desligamentos[is.na(brasil$desligamentos)] <- 0
-  dados <- dados[dados$uf %in% ufs, ]
-  grade <- expand.grid(competencia = competencia, uf = ufs)
-  grade <- merge(grade, dados, by = c("competencia", "uf"), all.x = TRUE)
-  grade$admissoes[is.na(grade$admissoes)] <- 0
-  grade$desligamentos[is.na(grade$desligamentos)] <- 0
-  brasil$uf <- "BR"
-  grade$uf <- sprintf("%02d", grade$uf)
-  resultado <- rbind(grade[, c("competencia", "uf", "admissoes", "desligamentos")],
-    brasil[, c("competencia", "uf", "admissoes", "desligamentos")])
-  # A partir de 2020, o Novo CAGED tem outra metodologia: a quebra fica explícita.
-  resultado$serie <- ifelse(resultado$competencia < 202001, "antigo", "novo")
-  resultado$saldo <- resultado$admissoes - resultado$desligamentos
-  resultado$cobertura <- "microdados"
-  if (nrow(saldos_sei)) {
-    # O saldo da SEI/BA é o saldo mensal básico. Acrescentamos os ajustes
-    # legíveis já agregados em "resultado" pela competência da movimentação.
-    # O saldo não determina quantas admissões e desligamentos ocorreram.
-    chave <- paste(resultado$competencia, resultado$uf)
-    indice <- match(paste(saldos_sei$competencia, saldos_sei$uf), chave)
-    if (anyNA(indice) || anyDuplicated(indice)) {
-      stop("Saldo alternativo incompleto ou duplicado", call. = FALSE)
-    }
-    resultado$saldo[indice] <- resultado$saldo[indice] + saldos_sei$saldo_base
-    resultado$admissoes[indice] <- NA_real_
-    resultado$desligamentos[indice] <- NA_real_
-    resultado$cobertura[indice] <- "saldo_apenas_SEI"
+  municipios
+}
+
+resumir_caged <- function(movimentos, municipios, lacunas = integer()) {
+  dados <- dplyr::filter(movimentos, competencia >= inicio, !competencia %in% lacunas)
+  # Também normaliza os resumos já existentes, inclusive máscaras truncadas.
+  dados$municipio[municipio_nao_identificado(dados$municipio, dados$uf)] <- NA_character_
+  codigos <- suppressWarnings(as.integer(dados$municipio))
+  seis_digitos <- municipios$code_muni %/% 10L
+  if (anyDuplicated(seis_digitos)) stop("Cadastro IBGE ambíguo", call. = FALSE)
+  indice <- match(codigos, seis_digitos)
+  completos <- !is.na(codigos) & nchar(codigos) == 7L
+  indice[completos] <- match(codigos[completos], municipios$code_muni)
+  if (any(!is.na(codigos) & is.na(indice)) ||
+      any(!is.na(dados$municipio) & !grepl("^[0-9]{6,7}$", dados$municipio))) {
+    stop("Município ausente do cadastro IBGE", call. = FALSE)
   }
-  # A fonte omitida pode afetar apenas algumas competências, não todas as linhas.
-  # Repetir o nome torna a limitação visível mesmo em recortes do CSV.
-  resultado$fontes_omitidas <- paste(fontes_omitidas, collapse = ";")
-  resultado[order(resultado$competencia, resultado$uf),
-    c("competencia", "uf", "serie", "cobertura", "fontes_omitidas",
-      "admissoes", "desligamentos", "saldo")]
+  dados$code_muni <- municipios$code_muni[indice]
+  if (any(!is.na(dados$code_muni) & dados$code_muni %/% 100000L != dados$uf)) {
+    stop("UF incompatível com município", call. = FALSE)
+  }
+  dados |>
+    dplyr::mutate(
+      ano = as.integer(competencia %/% 100L),
+      mes = as.integer(competencia %% 100L),
+      code_state = uf,
+      serie = ifelse(ano < 2020L, "antigo", "novo")
+    ) |>
+    dplyr::group_by(ano, mes, code_state, code_muni, serie) |>
+    dplyr::summarise(dplyr::across(c(admissoes, desligamentos), sum), .groups = "drop") |>
+    dplyr::left_join(estados, by = "code_state") |>
+    dplyr::mutate(saldo = admissoes - desligamentos) |>
+    dplyr::arrange(ano, mes, code_state, code_muni) |>
+    dplyr::select(ano, mes, code_state, abbrev_state, code_muni, serie,
+      admissoes, desligamentos, saldo)
 }
 
 resumir_arquivo <- function(arquivo, tipo) {
-  resumo <- paste0(arquivo, ".rds")
+  # O sufixo novo impede reutilizar resumos estaduais de execuções anteriores.
+  resumo <- paste0(arquivo, ".municipal-v1.rds")
   if (file.exists(resumo) && file.info(resumo)$mtime >= file.info(arquivo)$mtime) {
-    salvo <- try(readRDS(resumo), silent = TRUE)
-    if (!inherits(salvo, "try-error")) return(salvo)
-  }
-  # No arquivo antigo, a competência é a declarada; nos ajustes e no Novo
-  # CAGED, usamos a competência da movimentação. FOR inclui declarações tardias;
-  # EXC reverte movimentos excluídos, daí o sinal negativo abaixo.
-  posicoes <- switch(tipo, ANTIGO = c(2, 18, 24), AJUSTES = c(2, 15, 20), c(1, 3, 7))
-  esperados <- switch(tipo,
-    ANTIGO = c("competenciadeclarada", "saldomov", "uf"),
-    AJUSTES = c("competenciamovimentacao", "saldomov", "uf"),
-    c("competenciamov", "uf", "saldomovimentacao")
-  )
-  sinal <- if (tipo == "EXC") -1L else 1L
-  contar <- function(competencia, movimento, uf) {
-    competencia <- as.integer(competencia)
-    movimento <- as.integer(movimento)
-    uf[grepl("^\\{", uf)] <- "99"
-    uf <- as.integer(uf)
-    if (anyNA(competencia) || anyNA(uf) || anyNA(movimento) ||
-        any(!movimento %in% c(-1L, 1L))) {
-      stop("Campos inválidos no arquivo CAGED: ", arquivo, call. = FALSE)
-    }
-    chave <- competencia * 100L + uf
-    contagens <- rowsum(cbind(admissoes = as.integer(movimento == 1L) * sinal,
-      desligamentos = as.integer(movimento == -1L) * sinal), chave, reorder = FALSE)
-    chaves <- as.integer(rownames(contagens))
-    data.frame(competencia = chaves %/% 100L, uf = chaves %% 100L,
-      admissoes = contagens[, 1], desligamentos = contagens[, 2])
-  }
-  ler <- function(origem) {
-    dados <- readr::read_delim(origem,
-      delim = ";", col_select = posicoes,
-      col_types = readr::cols(.default = readr::col_character()),
-      locale = readr::locale(encoding = if (tipo %in% c("ANTIGO", "AJUSTES")) "latin1" else "UTF-8"),
-      show_col_types = FALSE, progress = FALSE, trim_ws = TRUE, lazy = FALSE,
-      name_repair = "minimal")
-    nomes <- tolower(gsub("[^a-zA-Z0-9]", "", iconv(names(dados), to = "ASCII//TRANSLIT")))
-    if (!identical(nomes, esperados) || !nrow(dados) || nrow(readr::problems(dados))) {
-      stop("Colunas inválidas no arquivo CAGED: ", arquivo, call. = FALSE)
-    }
-    if (tipo %in% c("ANTIGO", "AJUSTES")) {
-      contar(dados[[1]], dados[[2]], dados[[3]])
-    } else {
-      contar(dados[[1]], dados[[3]], dados[[2]])
-    }
+    return(readRDS(resumo))
   }
   pasta <- tempfile("caged_extraido_")
   dir.create(pasta)
   on.exit(unlink(pasta, recursive = TRUE), add = TRUE)
-  # Exigir saída 0 do 7-Zip evita aproveitar texto extraído parcialmente de um
-  # arquivo com erro de integridade; nesses casos entra o saldo alternativo.
   saida <- suppressWarnings(system2(localizar_7zip(),
-    args = c("e", shQuote(arquivo), paste0("-o", shQuote(pasta)), "-y"),
+    c("e", shQuote(arquivo), paste0("-o", shQuote(pasta)), "-y"),
     stdout = TRUE, stderr = TRUE))
   if (!is.null(attr(saida, "status")) && attr(saida, "status") != 0L) {
-    stop("Arquivo CAGED ilegível ou corrompido: ", basename(arquivo), call. = FALSE)
+    stop(errorCondition(paste0("Arquivo corrompido: ", basename(arquivo)),
+      class = "caged_corrompido"))
   }
   extraidos <- list.files(pasta, pattern = "\\.(txt|csv)$", full.names = TRUE,
     ignore.case = TRUE)
-  if (!length(extraidos)) stop("Arquivo CAGED vazio: ", arquivo, call. = FALSE)
-  partes <- lapply(extraidos, ler)
-  resultado <- do.call(rbind, partes)
-  resultado <- aggregate(cbind(admissoes, desligamentos) ~ competencia + uf, resultado, sum)
+  if (!length(extraidos)) stop("Arquivo sem microdados: ", arquivo, call. = FALSE)
+
+  competencia <- switch(tipo, ANTIGO = "competenciadeclarada",
+    AJUSTES = "competenciamovimentacao", "competenciamov")
+  movimento <- if (tipo %in% c("ANTIGO", "AJUSTES")) "saldomov" else "saldomovimentacao"
+  campos <- c(competencia, "uf", "municipio", movimento)
+  sinal <- if (tipo == "EXC") -1L else 1L
+  encoding <- if (tipo %in% c("ANTIGO", "AJUSTES")) "latin1" else "UTF-8"
+  normalizar <- function(x) {
+    x <- iconv(x, to = "ASCII//TRANSLIT")
+    tolower(gsub("[^a-zA-Z0-9]", "", x))
+  }
+  partes <- lapply(extraidos, function(texto) {
+    cabecalho <- readr::read_delim(texto, delim = ";", n_max = 0,
+      locale = readr::locale(encoding = encoding), show_col_types = FALSE,
+      name_repair = "minimal")
+    posicoes <- match(campos, normalizar(names(cabecalho)))
+    if (anyNA(posicoes)) stop("Colunas inválidas: ", arquivo, call. = FALSE)
+    dados <- suppressWarnings(readr::read_delim(texto, delim = ";", col_select = sort(posicoes),
+      col_types = readr::cols(.default = readr::col_character()),
+      locale = readr::locale(encoding = encoding), show_col_types = FALSE,
+      progress = FALSE, trim_ws = TRUE, lazy = FALSE, name_repair = "minimal"))
+    problemas <- readr::problems(dados)
+    if (nrow(problemas)) {
+      # Junho/2012 mistura linhas normais e linhas com um delimitador final.
+      # Só aceitar a coluna extra comprovadamente vazia, sem deslocar campos.
+      extra <- ncol(cabecalho) + 1L
+      terminal <- problemas$col == extra &
+        problemas$expected == paste(ncol(cabecalho), "columns") &
+        problemas$actual == paste(extra, "columns")
+      if (!all(terminal)) stop("Leitura incompleta: ", arquivo, call. = FALSE)
+      completo <- withCallingHandlers(data.table::fread(texto, sep = ";",
+        skip = 1L, header = FALSE, select = c(sort(posicoes), extra),
+        colClasses = "character", fill = Inf,
+        encoding = if (encoding == "latin1") "Latin-1" else "UTF-8",
+        showProgress = FALSE), warning = function(w) {
+          stop("Leitura incompleta: ", arquivo, call. = FALSE)
+        })
+      if (ncol(completo) != length(posicoes) + 1L ||
+          nrow(completo) != nrow(dados)) {
+        stop("Leitura incompleta: ", arquivo, call. = FALSE)
+      }
+      coluna_extra <- completo[[ncol(completo)]]
+      if (any(!is.na(coluna_extra) & nzchar(coluna_extra))) {
+        stop("Leitura incompleta: ", arquivo, call. = FALSE)
+      }
+      dados <- completo[, seq_along(posicoes), with = FALSE]
+      names(dados) <- names(cabecalho)[sort(posicoes)]
+    }
+    if (!nrow(dados)) {
+      stop("Leitura incompleta: ", arquivo, call. = FALSE)
+    }
+    names(dados) <- normalizar(names(dados))
+    municipio <- dados$municipio
+    municipio[municipio_nao_identificado(municipio, dados$uf)] <- NA_character_
+    uf <- dados$uf
+    uf[nao_identificado(uf)] <- "99"
+    movimento_valor <- suppressWarnings(as.integer(dados[[movimento]]))
+    numericos <- c(dados[[competencia]], uf, dados[[movimento]])
+    if (anyNA(numericos) || any(!grepl("^-?[0-9]+$", numericos))) {
+      stop("Campos inválidos: ", arquivo, call. = FALSE)
+    }
+    movimentos <- data.frame(
+      competencia = suppressWarnings(as.integer(dados[[competencia]])),
+      uf = suppressWarnings(as.integer(uf)), municipio = municipio,
+      admissoes = as.integer(movimento_valor == 1L) * sinal,
+      desligamentos = as.integer(movimento_valor == -1L) * sinal
+    )
+    datas <- as.Date(sprintf("%04d-%02d-01", movimentos$competencia %/% 100L,
+      movimentos$competencia %% 100L), format = "%Y-%m-%d")
+    if (anyNA(movimentos[c("competencia", "uf", "admissoes", "desligamentos")]) ||
+        anyNA(datas) || any(!movimentos$uf %in% estados$code_state) ||
+        any(!movimento_valor %in% c(1L, -1L))) {
+      stop("Campos inválidos: ", arquivo, call. = FALSE)
+    }
+    # Totais anteriores à conversão geográfica conferem se nenhum registro some.
+    totais <- movimentos |>
+      dplyr::group_by(competencia, uf) |>
+      dplyr::summarise(dplyr::across(c(admissoes, desligamentos), sum), .groups = "drop")
+    agregado <- movimentos |>
+      dplyr::group_by(competencia, uf, municipio) |>
+      dplyr::summarise(dplyr::across(c(admissoes, desligamentos), sum), .groups = "drop")
+    list(movimentos = agregado, totais = totais)
+  })
+  resultado <- list(
+    movimentos = dplyr::bind_rows(lapply(partes, `[[`, "movimentos")),
+    totais = dplyr::bind_rows(lapply(partes, `[[`, "totais"))
+  )
   saveRDS(resultado, resumo)
   resultado
 }
 
-arquivos_ajustes <- function(ajustes) {
-  anos <- sort(unique(ajustes$ano))
-  cache <- file.path(tools::R_user_dir("datacaged", "cache"), "CAGED_AJUSTES")
-  arquivos <- character()
-  for (ano in anos) {
-    meses <- if (ano <= 2009) 1L else sort(unique(ajustes$mes[ajustes$ano == ano]))
-    for (mes in meses) {
-      nome <- if (ano <= 2009) sprintf("CAGEDEST_AJUSTES_%04d.7z", ano) else
-        sprintf("CAGEDEST_AJUSTES_%02d%04d.7z", mes, ano)
-      pasta <- if (ano <= 2009) "2002a2009" else as.character(ano)
-      destino <- file.path(cache, pasta, nome)
-      if (!file.exists(destino)) {
-        dir.create(dirname(destino), recursive = TRUE, showWarnings = FALSE)
-        url <- paste("https://huggingface.co/datasets/alexsandroprado/caged/resolve/main",
-          "CAGED_AJUSTES", pasta, nome, sep = "/")
-        utils::download.file(url, destino, mode = "wb", method = "libcurl", quiet = TRUE)
-      }
-      if (!file.exists(destino) || file.info(destino)$size == 0) {
-        stop("Falha ao baixar ajuste CAGED: ", nome, call. = FALSE)
-      }
-      arquivos <- c(arquivos, destino)
-    }
+baixar_arquivo <- function(url, destino) {
+  dir.create(dirname(destino), recursive = TRUE, showWarnings = FALSE)
+  temporario <- tempfile(tmpdir = dirname(destino), fileext = ".part")
+  on.exit(unlink(temporario), add = TRUE)
+  resposta <- tryCatch(curl::curl_fetch_disk(url, temporario,
+    handle = curl::new_handle(connecttimeout = 30, timeout = 600)), error = identity)
+  if (inherits(resposta, "curl_error_remote_file_not_found")) return(FALSE)
+  if (inherits(resposta, "error")) stop(resposta)
+  if (resposta$status_code %in% c(404L, 550L)) return(FALSE)
+  if (resposta$status_code >= 400L || file.info(temporario)$size == 0) {
+    stop("Download falhou: ", url, call. = FALSE)
   }
-  arquivos
+  if (!file.copy(temporario, destino, overwrite = TRUE)) {
+    stop("Não foi possível salvar ", destino, call. = FALSE)
+  }
+  TRUE
 }
 
-obter_extras <- function(manifest, ajustes) {
-  # FOR/EXC marcados "nao_encontrado" no catálogo não têm arquivo a processar.
-  # Um arquivo presente porém corrompido é registrado e não interrompe os demais.
-  extras <- manifest[manifest$type %in% c("FOR", "EXC") &
-    manifest$status != "nao_encontrado", ]
-  arquivos_antigos <- arquivos_ajustes(ajustes)
-  fontes <- rbind(extras[, c("arquivo", "type")],
-    data.frame(arquivo = arquivos_antigos, type = "AJUSTES"))
-  saidas <- list()
-  omitidas <- character()
-  for (i in seq_len(nrow(fontes))) {
-    parte <- tryCatch(resumir_arquivo(fontes$arquivo[i], fontes$type[i]),
-      error = function(e) e)
-    if (inherits(parte, "error")) {
-      if (!startsWith(conditionMessage(parte), "Arquivo CAGED ilegível ou corrompido:"))
-        stop(parte)
-      omitidas <- c(omitidas, basename(fontes$arquivo[i]))
-      warning("Fonte CAGED corrompida e omitida: ", tail(omitidas, 1), call. = FALSE)
-    } else {
-      saidas[[length(saidas) + 1L]] <- parte
-    }
+processar_fonte <- function(fonte, cache, atualizar = FALSE, baixar = baixar_arquivo) {
+  erros <- character()
+  ausentes <- logical()
+  indisponiveis <- logical()
+  for (origem in c("espelho", "oficial")) {
+    pasta <- if (origem == "espelho") cache else file.path(cache, "oficial")
+    caminho <- if (origem == "espelho") {
+      sub("NOVO CAGED", "NOVO_CAGED", fonte$caminho, fixed = TRUE)
+    } else fonte$caminho
+    arquivo <- file.path(pasta, caminho)
+    parte <- tryCatch({
+      existe <- file.exists(arquivo) && file.info(arquivo)$size > 0
+      if ((!existe || atualizar) && !baixar(fonte[[origem]], arquivo)) {
+        NULL
+      } else {
+        resumir_arquivo(arquivo, fonte$tipo)
+      }
+    }, error = identity)
+    if (!inherits(parte, "error") && !is.null(parte)) return(parte)
+    ausentes <- c(ausentes, is.null(parte))
+    indisponiveis <- c(indisponiveis,
+      is.null(parte) || inherits(parte, "caged_corrompido"))
+    erros <- c(erros, if (is.null(parte)) "ausente" else conditionMessage(parte))
   }
-  list(partes = saidas, omitidas = omitidas)
+  if (fonte$tipo %in% c("FOR", "EXC") && all(ausentes)) return(NULL)
+  mensagem <- paste0(basename(fonte$caminho), ": espelho: ", erros[1], "; FTP: ", erros[2])
+  if (all(indisponiveis)) {
+    stop(errorCondition(mensagem, class = "caged_fonte_indisponivel"))
+  }
+  stop(mensagem, call. = FALSE)
 }
 
-obter_saldos_sei <- function(competencias) {
-  # Fonte alternativa: planilhas anuais de saldo mensal BR/UF da SEI/BA.
-  # Elas não trazem as contagens de admissões e desligamentos.
-  # https://www.ba.gov.br/sei/caged-0
-  vazio <- data.frame(competencia = integer(), uf = character(), saldo_base = numeric())
-  if (!length(competencias)) return(vazio)
-  cache <- tools::R_user_dir("av_imp_tz_caged", "cache")
-  dir.create(cache, recursive = TRUE, showWarnings = FALSE)
-  nomes <- c("BRASIL", "NORTE", "RONDONIA", "ACRE", "AMAZONAS", "RORAIMA",
-    "PARA", "AMAPA", "TOCANTINS", "NORDESTE", "MARANHAO", "PIAUI", "CEARA",
-    "RIO GRANDE DO NORTE", "PARAIBA", "PERNAMBUCO", "ALAGOAS", "SERGIPE",
-    "BAHIA", "SUDESTE", "MINAS GERAIS", "ESPIRITO SANTO", "RIO DE JANEIRO",
-    "SAO PAULO", "SUL", "PARANA", "SANTA CATARINA", "RIO GRANDE DO SUL",
-    "CENTRO-OESTE", "MATO GROSSO", "MATO GROSSO DO SUL", "GOIAS",
-    "DISTRITO FEDERAL")
-  # A planilha intercala linhas de macrorregião; selecionar BR e as 27 UFs.
-  linhas <- c(1L, 3:9, 11:19, 21:24, 26:28, 30:33)
-  ufs <- c("BR", sprintf("%02d", c(11:17, 21:29, 31, 32, 33, 35, 41:43,
-    51, 50, 52, 53)))
-  limpar <- function(x) toupper(iconv(trimws(x), to = "ASCII//TRANSLIT"))
-  resultados <- list()
-  for (ano in sort(unique(competencias %/% 100))) {
-    meses <- competencias[competencias %/% 100 == ano] %% 100
-    arquivo <- file.path(cache, sprintf("ind_caged_uf_%d.xls", ano))
-    tabela <- tryCatch({
-      if (!file.exists(arquivo)) {
-        temporario <- tempfile(tmpdir = cache, fileext = ".xls")
-        on.exit(unlink(temporario), add = TRUE)
-        url <- sprintf(paste0("https://www.ba.gov.br/sei/sites/site-sei/files/",
-          "migracao_2024/arquivos/images/releases_mensais/xls/caged/",
-          "%d/ind_caged_uf_%d.xls"), ano, ano)
-        utils::download.file(url, temporario, mode = "wb", method = "libcurl", quiet = TRUE)
-        if (!file.exists(temporario) || file.info(temporario)$size == 0 ||
-            !file.rename(temporario, arquivo)) stop("download incompleto")
-      }
-      x <- readxl::read_excel(arquivo, range = "A5:M37", col_names = FALSE,
-        .name_repair = "minimal")
-      if (nrow(x) != 33L || ncol(x) != 13L ||
-          !identical(limpar(x[[1]]), nomes)) stop("estrutura inesperada da planilha")
-      x
-    }, error = function(e) {
-      warning("Saldo SEI indisponível para ", ano, ": ", conditionMessage(e),
-        call. = FALSE)
-      NULL
-    })
-    if (is.null(tabela)) next
-    for (mes in meses) {
-      valores <- suppressWarnings(as.numeric(tabela[[mes + 1L]][linhas]))
-      if (length(valores) != 28L || anyNA(valores)) {
-        warning("Saldo SEI inválido para ", ano * 100L + mes, call. = FALSE)
-        next
-      }
-      resultados[[length(resultados) + 1L]] <- data.frame(
-        competencia = ano * 100L + mes, uf = ufs, saldo_base = valores)
-    }
+listar_fontes <- function() {
+  antigo <- datacaged::caged_hf_files(type = "antigo", n = Inf, verbose = FALSE)
+  novo <- datacaged::caged_hf_files(type = "novo", n = Inf, verbose = FALSE)
+  if (!nrow(antigo) || !nrow(novo)) {
+    stop("Catálogos antigo/novo do CAGED indisponíveis", call. = FALSE)
   }
-  if (length(resultados)) do.call(rbind, resultados) else vazio
+  competencias <- sort(unique(as.integer(c(antigo$competencia, novo$competencia))))
+  competencias <- competencias[competencias >= inicio]
+  conferir_periodos(competencias)
+  fontes <- dplyr::bind_rows(lapply(competencias, function(periodo) {
+    ano <- periodo %/% 100L
+    mes <- periodo %% 100L
+    tipos <- if (ano < 2020L) c("ANTIGO", "AJUSTES") else c("MOV", "FOR", "EXC")
+    dplyr::bind_rows(lapply(tipos, function(tipo) {
+      nome <- switch(tipo,
+        ANTIGO = sprintf("CAGEDEST_%02d%04d.7z", mes, ano),
+        AJUSTES = sprintf("CAGEDEST_AJUSTES_%02d%04d.7z", mes, ano),
+        paste0("CAGED", tipo, periodo, ".7z"))
+      pasta <- switch(tipo, ANTIGO = "CAGED", AJUSTES = "CAGED_AJUSTES", "NOVO CAGED")
+      caminho <- paste(pasta, ano, if (ano >= 2020L) paste0(periodo, "/", nome) else nome,
+        sep = "/")
+      data.frame(tipo = tipo, competencia = periodo, caminho = caminho)
+    }))
+  }))
+  caminho_url <- gsub(" ", "%20", fontes$caminho, fixed = TRUE)
+  fontes$espelho <- paste0(
+    "https://huggingface.co/datasets/alexsandroprado/caged/resolve/main/",
+    sub("NOVO%20CAGED", "NOVO_CAGED", caminho_url, fixed = TRUE))
+  fontes$oficial <- paste0("ftp://ftp.mtps.gov.br/pdet/microdados/", caminho_url)
+  fontes
 }
 
 obter_caged <- function() {
-  antigo <- datacaged::caged_hf_files(type = "antigo", n = Inf, verbose = FALSE)
-  novo <- datacaged::caged_hf_files(type = "novo", n = Inf, verbose = FALSE)
-  ajustes <- datacaged::caged_hf_files(type = "ajustes", n = Inf, verbose = FALSE)
-  if (!nrow(antigo) || !nrow(novo)) stop("Competências do CAGED indisponíveis", call. = FALSE)
-  antigo$competencia <- as.integer(antigo$competencia)
-  novo$competencia <- as.integer(novo$competencia)
-  ajustes$competencia <- as.integer(ajustes$competencia)
-  antigo <- antigo[antigo$competencia >= 200805L, ]
-  ajustes <- ajustes[ajustes$competencia >= min(antigo$competencia), ]
-  conferir_periodos(sort(unique(c(antigo$competencia, novo$competencia))), "fontes CAGED")
-  if (!nzchar(localizar_7zip())) {
-    stop("7-Zip é necessário para processar o CAGED antigo", call. = FALSE)
-  }
-  recentes <- tail(sort(unique(novo$competencia)), 12)
-  # Atualizamos os 12 meses de declaração mais recentes para captar revisões,
-  # inclusive FOR/EXC tardios. caged_update() deduplica pela competência do
-  # arquivo; aqui resumimos cada fonte pela competência da movimentação.
-  manifests <- list()
-  for (fonte in list(antigo, novo)) {
-    for (ano in sort(unique(fonte$ano))) {
-      meses <- sort(unique(fonte$mes[fonte$ano == ano]))
-      atualizar <- fonte$competencia[fonte$ano == ano & fonte$competencia %in% recentes] %% 100
-      for (forcar in c(FALSE, TRUE)) {
-        selecionados <- if (forcar) intersect(meses, atualizar) else setdiff(meses, atualizar)
-        if (length(selecionados)) {
-          manifests[[length(manifests) + 1L]] <- datacaged::caged_download(
-            years = ano, months = selecionados, force = forcar)
-        }
-      }
-    }
-  }
-  manifest <- do.call(rbind, manifests)
-  if (nrow(manifest) != nrow(antigo) + 3 * nrow(novo) ||
-      any(!manifest$status %in% c("cache", "baixado", "nao_encontrado")) ||
-      any(manifest$status == "nao_encontrado" &
-        !manifest$type %in% c("FOR", "EXC")) ||
-      any(!file.exists(manifest$arquivo[manifest$status != "nao_encontrado"]))) {
-    stop("Download CAGED incompleto", call. = FALSE)
-  }
-  base <- manifest[manifest$type %in% c("ANTIGO", "MOV"), ]
+  fontes <- listar_fontes()
+  municipios <- obter_municipios()
+  cache <- tools::R_user_dir("datacaged", "cache")
+  recentes <- tail(sort(unique(fontes$competencia)), 12)
   partes <- list()
-  corrompidos <- integer()
-  for (i in seq_len(nrow(base))) {
-    if (i == 1L || base$mes[i] == 1L) message("Processando CAGED ", base$ano[i])
-    parte <- tryCatch(resumir_arquivo(base$arquivo[i], base$type[i]),
-      error = function(e) e)
-    if (inherits(parte, "error")) {
-      # Só o arquivo mensal antigo admite substituição por saldo da SEI/BA.
-      # Outros erros de base impedem publicar dados potencialmente incompletos.
-      if (base$type[i] != "ANTIGO" ||
-          !startsWith(conditionMessage(parte), "Arquivo CAGED ilegível ou corrompido:")) {
-        stop(parte)
+  falhas <- character()
+  lacunas <- integer()
+  for (i in seq_len(nrow(fontes))) {
+    fonte <- fontes[i, ]
+    message("Processando ", basename(fonte$caminho))
+    # Atualizar declarações recentes também recupera FOR/EXC tardios. O resumo
+    # usa a competência da movimentação, nunca a competência de deduplicação.
+    atualizar <- fonte$competencia >= 202001L && fonte$competencia %in% recentes
+    parte <- tryCatch(processar_fonte(fonte, cache, atualizar), error = identity)
+    if (inherits(parte, "caged_fonte_indisponivel")) {
+      warning("Fonte não recuperada e omitida: ", conditionMessage(parte), call. = FALSE)
+      if (fonte$tipo %in% c("ANTIGO", "MOV")) {
+        lacunas <- c(lacunas, fonte$competencia)
       }
-      corrompidos <- c(corrompidos, base$ano[i] * 100L + base$mes[i])
-      warning("Microdados CAGED corrompidos em ", tail(corrompidos, 1),
-        "; tentando saldo SEI", call. = FALSE)
-    } else {
+    } else if (inherits(parte, "error")) {
+      falhas <- c(falhas, conditionMessage(parte))
+    } else if (!is.null(parte)) {
       partes[[length(partes) + 1L]] <- parte
     }
     gc(FALSE)
   }
-  extras <- obter_extras(manifest, ajustes)
-  saldos_sei <- obter_saldos_sei(corrompidos)
-  resumir_caged(c(partes, extras$partes), datacaged::uf_codigos$codigo,
-    min(antigo$competencia), corrompidos, saldos_sei, extras$omitidas)
+  if (length(falhas)) stop("Fontes não recuperadas; publicação cancelada:\n",
+    paste(falhas, collapse = "\n"), call. = FALSE)
+  movimentos <- dplyr::bind_rows(lapply(partes, `[[`, "movimentos"))
+  totais <- dplyr::bind_rows(lapply(partes, `[[`, "totais"))
+  # Se faltar a base mensal, nem ajustes legíveis tornam esse mês completo.
+  dados <- resumir_caged(movimentos, municipios, lacunas)
+  bases <- fontes$competencia[fontes$tipo %in% c("ANTIGO", "MOV")]
+  validar_resultado(dados, totais, bases, lacunas)
+  dados
 }
 
-validar_resultado <- function(dados, colunas_periodo) {
-  # Toda competência publicada precisa ter BR e 27 UFs, sem duplicatas.
-  # NA em admissões/desligamentos só é válido onde a cobertura é apenas saldo.
-  chave <- dados[, c(colunas_periodo, "uf")]
-  periodo <- do.call(paste, c(dados[colunas_periodo], sep = "-"))
-  nao_nulos <- setdiff(names(dados), if ("cobertura" %in% names(dados))
-    c("admissoes", "desligamentos") else character())
-  if (!nrow(dados) || anyNA(dados[nao_nulos]) || anyDuplicated(chave) ||
-      any(table(periodo) != 28) ||
-      !setequal(unique(dados$uf), c("BR", sprintf("%02d", datacaged::uf_codigos$codigo)))) {
-    stop("Resultado incompleto ou duplicado; publicação cancelada", call. = FALSE)
+validar_resultado <- function(dados, totais, competencias_base, lacunas = integer()) {
+  conferir_periodos(competencias_base)
+  if (any(!lacunas %in% competencias_base)) stop("Lacunas fora do período da base")
+  competencias <- dados$ano * 100L + dados$mes
+  if (anyNA(competencias) || any(!dados$mes %in% 1:12) ||
+      !setequal(competencias, setdiff(competencias_base, lacunas))) {
+    stop("Competências do resultado incompletas ou inválidas", call. = FALSE)
   }
-  if ("cobertura" %in% names(dados) &&
-      (any(!dados$cobertura %in% c("microdados", "saldo_apenas_SEI")) ||
-       any(is.na(dados$admissoes) != (dados$cobertura == "saldo_apenas_SEI")) ||
-       any(is.na(dados$desligamentos) != (dados$cobertura == "saldo_apenas_SEI")))) {
-    stop("Cobertura CAGED inconsistente; publicação cancelada", call. = FALSE)
+  chave <- dados[c("ano", "mes", "code_state", "code_muni")]
+  if (!nrow(dados) || anyDuplicated(chave)) stop("Resultado vazio ou duplicado", call. = FALSE)
+  obrigatorias <- setdiff(names(dados), "code_muni")
+  if (anyNA(dados[obrigatorias])) stop("Campos obrigatórios ausentes", call. = FALSE)
+  if (any(dados$saldo != dados$admissoes - dados$desligamentos)) {
+    stop("Saldo inconsistente", call. = FALSE)
   }
+  siglas <- estados$abbrev_state[match(dados$code_state, estados$code_state)]
+  municipio <- dados$code_muni
+  if (anyNA(siglas) || any(dados$abbrev_state != siglas) ||
+      any(!is.na(municipio) & (nchar(municipio) != 7L |
+        municipio %/% 100000L != dados$code_state))) {
+    stop("Códigos geográficos inconsistentes", call. = FALSE)
+  }
+  if (any(dados$serie != ifelse(dados$ano < 2020L, "antigo", "novo"))) {
+    stop("Série metodológica inconsistente", call. = FALSE)
+  }
+  esperado <- totais |>
+    dplyr::filter(competencia >= inicio, !competencia %in% lacunas) |>
+    dplyr::group_by(competencia, uf) |>
+    dplyr::summarise(dplyr::across(c(admissoes, desligamentos), sum), .groups = "drop")
+  obtido <- dados |>
+    dplyr::mutate(competencia = ano * 100L + mes, uf = code_state) |>
+    dplyr::group_by(competencia, uf) |>
+    dplyr::summarise(dplyr::across(c(admissoes, desligamentos), sum), .groups = "drop")
+  comparacao <- dplyr::full_join(esperado, obtido, by = c("competencia", "uf"),
+    suffix = c("_fonte", "_municipios"))
+  if (anyNA(comparacao) ||
+      any(comparacao$admissoes_fonte != comparacao$admissoes_municipios) ||
+      any(comparacao$desligamentos_fonte != comparacao$desligamentos_municipios)) {
+    stop("Totais das UFs/Brasil divergem da soma municipal", call. = FALSE)
+  }
+  invisible(TRUE)
 }
 
-preparar_asset <- function(dados, nome, diretorio) {
-  csv <- file.path(diretorio, paste0(nome, ".csv"))
-  readr::write_csv(dados, csv, na = "")
-  if (file.info(csv)$size <= limite_csv) return(csv)
-  parquet <- file.path(diretorio, paste0(nome, ".parquet"))
-  arrow::write_parquet(dados, parquet)
-  unlink(csv)
-  parquet
+preparar_asset <- function(dados, diretorio) {
+  dir.create(diretorio, recursive = TRUE, showWarnings = FALSE)
+  arquivo <- file.path(diretorio, "caged_movimentacoes_mensais.parquet")
+  arrow::write_parquet(dados, arquivo)
+  arquivo
 }
 
 publicar <- function(arquivo) {
-  # Confirmar o HTTP antes de remover o formato antigo do mesmo resultado.
-  resposta <- piggyback::pb_upload(arquivo, repo = repo, tag = release_tag,
-    overwrite = TRUE)
+  if (!nzchar(gh::gh_token())) stop("Autenticação do GitHub ausente", call. = FALSE)
+  resposta <- piggyback::pb_upload(arquivo, repo = repo, tag = release_tag, overwrite = TRUE)
   httr::stop_for_status(resposta[[1]])
-  extensao_antiga <- if (grepl("\\.csv$", arquivo)) ".parquet" else ".csv"
-  piggyback::pb_delete(paste0(tools::file_path_sans_ext(basename(arquivo)), extensao_antiga),
-    repo = repo, tag = release_tag)
 }
 
-executar <- function() {
-  if (.Platform$OS.type == "windows" &&
-      is.na(suppressWarnings(Sys.setlocale("LC_CTYPE", "Portuguese_Brazil.utf8")))) {
-    stop("Locale UTF-8 indisponível para ler o CAGED antigo", call. = FALSE)
-  }
-  pacotes <- c("datacaged", "readr", "readxl", "arrow", "piggyback", "gh", "httr")
+executar <- function(args = commandArgs(trailingOnly = TRUE)) {
+  if (any(!args %in% "--publicar")) stop("Argumento inválido: ", paste(args, collapse = " "))
+  if (.Platform$OS.type == "windows") Sys.setlocale("LC_CTYPE", "Portuguese_Brazil.utf8")
+  pacotes <- c("datacaged", "dplyr", "readr", "data.table", "curl", "jsonlite", "arrow")
+  if ("--publicar" %in% args) pacotes <- c(pacotes, "piggyback", "gh", "httr")
   faltam <- pacotes[!vapply(pacotes, requireNamespace, logical(1), quietly = TRUE)]
-  if (length(faltam)) stop("Instale os pacotes: ", paste(faltam, collapse = ", "), call. = FALSE)
-  if (!nzchar(gh::gh_token())) stop("Autenticação do GitHub ausente", call. = FALSE)
-  releases <- piggyback::pb_releases(repo, verbose = FALSE)
-  if (!release_tag %in% releases$tag_name) stop("Release 'data' não encontrado", call. = FALSE)
-
-  caged <- obter_caged()
-  validar_resultado(caged, "competencia")
-  completos <- caged$cobertura == "microdados"
-  if (any(caged$saldo[completos] !=
-      caged$admissoes[completos] - caged$desligamentos[completos])) {
-    stop("Inconsistência nos indicadores; publicação cancelada", call. = FALSE)
-  }
-
-  diretorio <- tempfile("assets_mercado_")
-  dir.create(diretorio)
-  on.exit(unlink(diretorio, recursive = TRUE), add = TRUE)
-  arquivos <- preparar_asset(caged, "caged_movimentacoes_mensais", diretorio)
-  invisible(lapply(arquivos, publicar))
-  release <- gh::gh("GET /repos/:owner/:repo/releases/tags/:tag",
-    owner = "pedreirajr", repo = "av_imp_tz", tag = release_tag)
-  nomes <- vapply(release$assets, function(asset) asset$name, character(1))
-  if (!all(basename(arquivos) %in% nomes)) {
-    stop("Assets publicados não encontrados no release", call. = FALSE)
-  }
-  print(data.frame(arquivo = nomes, bytes = vapply(release$assets,
-    function(asset) asset$size, numeric(1))))
+  if (length(faltam)) stop("Instale os pacotes: ", paste(faltam, collapse = ", "))
+  if (!nzchar(localizar_7zip())) stop("Instale o 7-Zip para conferir a integridade dos arquivos")
+  dados <- obter_caged()
+  arquivo <- preparar_asset(dados, "dados")
+  if ("--publicar" %in% args) publicar(arquivo)
+  message("Parquet validado: ", normalizePath(arquivo, winslash = "/"))
+  invisible(arquivo)
 }
 
 if (sys.nframe() == 0L) executar()
