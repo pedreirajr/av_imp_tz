@@ -41,9 +41,9 @@ colunas <- paste(
 
 QUERY <- sprintf("
 SELECT
-    dados.id_municipio AS id_municipio,
-    diretorio_id_municipio.nome AS id_municipio_nome,
-    dados.sigla_uf     AS sigla_uf,
+    dados.id_municipio          AS code_muni,
+    diretorio_id_municipio.nome AS name_muni,
+    dados.sigla_uf              AS abbrev_state,
     dados.ano          AS ano,
     dados.mes          AS mes,
 %s
@@ -56,7 +56,7 @@ LEFT JOIN (
 WHERE dados.ano >= %d
   AND dados.tipo_veiculo IS NOT NULL
   AND dados.tipo_veiculo != ''
-GROUP BY id_municipio, id_municipio_nome, sigla_uf, ano, mes
+GROUP BY code_muni, name_muni, abbrev_state, ano, mes
 ", colunas, TABELA, ANO_INICIAL)
 
 
@@ -65,7 +65,7 @@ frota_wide <- read_sql(query = QUERY, billing_project_id = BILLING_ID)
 message(sprintf("  Linhas baixadas: %s", format(nrow(frota_wide), big.mark = ".", decimal.mark = ",")))
 
 
-frota_wide <- frota_wide[order(frota_wide$id_municipio, frota_wide$ano, frota_wide$mes), ]
+frota_wide <- frota_wide[order(frota_wide$code_muni, frota_wide$ano, frota_wide$mes), ]
 
 
 if ("automovel" %in% names(frota_wide)) {
@@ -76,17 +76,14 @@ message(sprintf("Painel final: %s linhas, %d colunas",
                  format(nrow(frota_wide), big.mark = ".", decimal.mark = ","), ncol(frota_wide)))
 
 
-arquivo_saida <- "frota_mensal_municipio.parquet"
+arquivo_saida <- file.path(tempdir(), "frota_mensal_municipio.parquet")
 write_parquet(frota_wide, arquivo_saida)
 message(sprintf("Arquivo salvo: %s (%s linhas)",
                  arquivo_saida, format(nrow(frota_wide), big.mark = ".", decimal.mark = ",")))
 
 
 
-#publicação no release via piggyback 
-releases <- pb_releases(repo = REPO)
-if (!(TAG %in% releases$tag_name)) {
-  pb_new_release(repo = REPO, tag = TAG)
-}
+# publicação no release via piggyback (a release precisa já existir)
 pb_upload(file = arquivo_saida, repo = REPO, tag = TAG, overwrite = TRUE)
+unlink(arquivo_saida)
 message(sprintf("Publicado em https://github.com/%s/releases/tag/%s", REPO, TAG))
