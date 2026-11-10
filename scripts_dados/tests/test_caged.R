@@ -1,7 +1,10 @@
-# Executar da raiz: Rscript tests/test_caged.R
+# Executar da raiz: Rscript scripts_dados/tests/test_caged.R
 Sys.setlocale("LC_CTYPE", "Portuguese_Brazil.utf8")
 library(testthat)
-source("scripts_dados/mercado_trabalho.R", encoding = "UTF-8")
+script <- if (file.exists("../mercado_trabalho.R")) {
+  "../mercado_trabalho.R"
+} else "scripts_dados/mercado_trabalho.R"
+source(script, encoding = "UTF-8")
 
 municipios <- data.frame(code_muni = c(1200401L, 2927408L, 3550308L))
 movimentos <- data.frame(
@@ -76,6 +79,7 @@ criar_arquivo <- function(pasta, nome, cabecalho, linhas) {
 }
 
 test_that("município Ignorado do dicionário oficial preserva UF e totais", {
+  skip_if(!nzchar(localizar_7zip()))
   dados <- movimentos[2, ]
   dados$municipio <- "299999"
   resultado <- resumir_caged(dados, municipios)
@@ -94,6 +98,7 @@ test_that("município Ignorado do dicionário oficial preserva UF e totais", {
 })
 
 test_that("layouts antigo, ajuste, MOV, FOR e EXC usam competência do movimento", {
+  skip_if(!nzchar(localizar_7zip()))
   pasta <- tempfile()
   dir.create(pasta)
   on.exit(unlink(pasta, recursive = TRUE))
@@ -129,6 +134,7 @@ test_that("layouts antigo, ajuste, MOV, FOR e EXC usam competência do movimento
 })
 
 test_that("fonte corrompida é recuperada no FTP ou interrompe a carga", {
+  skip_if(!nzchar(localizar_7zip()))
   pasta <- tempfile()
   dir.create(pasta)
   on.exit(unlink(pasta, recursive = TRUE))
@@ -160,6 +166,7 @@ test_that("fonte corrompida é recuperada no FTP ou interrompe a carga", {
 })
 
 test_that("layout antigo aceita admissão 01 e rejeita números fracionários", {
+  skip_if(!nzchar(localizar_7zip()))
   pasta <- tempfile()
   dir.create(pasta)
   on.exit(unlink(pasta, recursive = TRUE))
@@ -174,31 +181,49 @@ test_that("layout antigo aceita admissão 01 e rejeita números fracionários", 
 })
 
 test_that("escrita é sempre Parquet, com esquema preservado", {
-  pasta <- tempfile()
-  dir.create(pasta)
-  on.exit(unlink(pasta, recursive = TRUE))
   resultado <- resumir_caged(movimentos, municipios)
-  arquivo <- preparar_asset(resultado, pasta)
+  arquivo <- preparar_asset(resultado)
+  on.exit(unlink(arquivo))
+  expect_identical(arquivo, file.path(tempdir(), "caged_movimentacoes_mensais.parquet"))
   expect_identical(basename(arquivo), "caged_movimentacoes_mensais.parquet")
-  expect_false(any(grepl("csv$", list.files(pasta))))
+  expect_false(file.exists(sub("parquet$", "csv", arquivo)))
   expect_equal(as.data.frame(arrow::read_parquet(arquivo)), as.data.frame(resultado))
 })
 
 test_that("execução local não publica e falha de carga impede upload", {
-  pasta <- tempfile()
-  dir.create(pasta)
-  on.exit(unlink(pasta, recursive = TRUE))
+  skip_if(!nzchar(localizar_7zip()))
   ambiente <- new.env(parent = globalenv())
-  sys.source("scripts_dados/mercado_trabalho.R", envir = ambiente)
+  sys.source(script, envir = ambiente)
   ambiente$obter_caged <- function() resumir_caged(movimentos, municipios)
-  ambiente$preparar_asset <- function(dados, diretorio) preparar_asset(dados, pasta)
   publicado <- character()
   ambiente$publicar <- function(arquivo) publicado <<- arquivo
   arquivo <- ambiente$executar(character())
+  on.exit(unlink(arquivo))
+  expect_identical(arquivo, file.path(tempdir(), "caged_movimentacoes_mensais.parquet"))
   expect_true(file.exists(arquivo))
   expect_length(publicado, 0)
   ambiente$executar("--publicar")
   expect_identical(publicado, arquivo)
+  expect_false(file.exists(arquivo))
+  ambiente$publicar <- function(arquivo) invisible(file(arquivo, "rb"))
+  suppressWarnings(ambiente$executar("--publicar"))
+  expect_false(file.exists(arquivo))
+  arquivo_outro <- tempfile()
+  conexao_outro <- file(arquivo_outro, "wb")
+  on.exit({ close(conexao_outro); unlink(arquivo_outro) }, add = TRUE)
+  ambiente$publicar <- function(arquivo) {
+    ambiente$conexao_upload <- file(arquivo, "rb")
+    invisible(NULL)
+  }
+  ambiente$executar("--publicar")
+  expect_false(file.exists(arquivo))
+  expect_true(isOpen(conexao_outro))
+  ambiente$publicar <- function(arquivo) {
+    conexao <- file(arquivo, "rb")
+    stop("Upload falhou")
+  }
+  expect_error(suppressWarnings(ambiente$executar("--publicar")), "Upload falhou")
+  expect_false(file.exists(arquivo))
   publicado <- character()
   ambiente$obter_caged <- function() stop("Fonte incompleta")
   expect_error(ambiente$executar("--publicar"), "Fonte incompleta")
@@ -215,9 +240,9 @@ test_that("catálogo ausente não vira série histórica truncada", {
   }
 })
 
-test_that("lacuna autorizada omite o mês inteiro e preserva demais movimentos", {
+test_that("base corrompida nas duas fontes omite o mês inteiro e preserva demais movimentos", {
   ambiente <- new.env(parent = globalenv())
-  sys.source("scripts_dados/mercado_trabalho.R", envir = ambiente)
+  sys.source(script, envir = ambiente)
   ambiente$obter_municipios <- function() municipios
   ambiente$listar_fontes <- function() data.frame(
     tipo = c("ANTIGO", "ANTIGO", "AJUSTES", "AJUSTES"),
@@ -253,6 +278,7 @@ test_that("lacuna autorizada omite o mês inteiro e preserva demais movimentos",
 })
 
 test_that("máscaras truncadas do CAGED antigo preservam localização desconhecida", {
+  skip_if(!nzchar(localizar_7zip()))
   pasta <- tempfile()
   dir.create(pasta)
   on.exit(unlink(pasta, recursive = TRUE))
@@ -271,6 +297,7 @@ test_that("máscaras truncadas do CAGED antigo preservam localização desconhec
 })
 
 test_that("coluna terminal vazia não desloca campos nem descarta registros", {
+  skip_if(!nzchar(localizar_7zip()))
   pasta <- tempfile()
   dir.create(pasta)
   on.exit(unlink(pasta, recursive = TRUE))

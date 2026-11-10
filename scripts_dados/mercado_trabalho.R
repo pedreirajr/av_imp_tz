@@ -1,6 +1,6 @@
 # Executar da raiz: Rscript scripts_dados/mercado_trabalho.R
-# Gera localmente dados/caged_movimentacoes_mensais.parquet para revisão.
-# Publicar após revisão: Rscript scripts_dados/mercado_trabalho.R --publicar
+# Gera caged_movimentacoes_mensais.parquet em tempdir() durante a sessão R.
+# Publicar e apagar o temporário: Rscript scripts_dados/mercado_trabalho.R --publicar
 # Dependências: datacaged, dplyr, readr, data.table, curl, jsonlite, arrow; 7-Zip.
 # Publicação: piggyback, gh e httr, com autenticação do GitHub.
 #
@@ -11,23 +11,23 @@
 # Não há substituição pela SEI: saldo estadual não recupera movimentos municipais
 # e a planilha de agosto/2009 contém erros de escala nas UFs da região Norte.
 #
-# O CSV estadual anterior diferia da soma das 27 UFs em TODOS os meses do Novo
-# CAGED conferidos, por incluir UF não identificada apenas no Brasil. Agora esses
-# movimentos são preservados na saída: code_state=99, abbrev_state="NI", code_muni=NA.
+# O CSV estadual anterior incluía UF não identificada apenas no total Brasil.
+# Isso causava diferença em todos os meses do Novo CAGED conferidos. Esses
+# movimentos usam code_state=99, abbrev_state="NI" e code_muni=NA na saída.
 # Município não identificado com UF conhecida mantém a UF e code_muni=NA.
 # O dicionário CAGEDEST também usa UF + 9999 para município "Ignorado".
 # Não somar totais BR/UF à tabela: cada movimento aparece uma única vez.
 # Nas competências cobertas, ausência de linha municipal indica ausência de
 # movimentos nas fontes lidas. Competência omitida é lacuna, nunca zero.
 #
-# Conferência em 2026-11-09: o FTP recuperou 15 das 16 bases problemáticas.
-# Março/2011 e CAGEDEST_AJUSTES_102010.7z continuam corrompidos nas duas fontes.
-# Por decisão do usuário, omitir março/2011 INTEIRO, inclusive seus ajustes,
-# e o ajuste 2010-10. Este ajuste ausente pode alterar contagens e saldos de
-# competências anteriores; não é possível quantificar seu efeito sem o arquivo.
-# Toda nova fonte sem recuperação por integridade/ausência gera aviso explícito.
-# Erros de rede, layout, conteúdo e validação continuam interrompendo a carga.
-# FOR/EXC inexistentes em AMBAS as fontes são vazios; erro de rede não é ausência.
+# Na conferência de 09/11/2026, o FTP recuperou 15 das 16 bases que falharam
+# no espelho. A base de março/2011 e CAGEDEST_AJUSTES_102010.7z estão corrompidos
+# nas duas fontes. Março/2011 fica fora da série, inclusive seus ajustes.
+# A falta do ajuste de outubro/2010 pode afetar contagens e saldos de meses
+# anteriores; não é possível medir esse efeito sem recuperar o arquivo.
+# Fontes ausentes ou corrompidas nas duas origens são omitidas com aviso.
+# Erros de rede, layout, conteúdo ou validação interrompem a carga.
+# FOR/EXC ausentes nas duas fontes são vazios; erro de rede não é ausência.
 # Fonte oficial e layouts: https://www.gov.br/trabalho-e-emprego/pt-br/
 # acesso-a-informacao/acoes-e-programas/programas-projetos-acoes-obras-e-atividades/
 # estatisticas-trabalho/microdados-rais-e-caged
@@ -400,9 +400,8 @@ validar_resultado <- function(dados, totais, competencias_base, lacunas = intege
   invisible(TRUE)
 }
 
-preparar_asset <- function(dados, diretorio) {
-  dir.create(diretorio, recursive = TRUE, showWarnings = FALSE)
-  arquivo <- file.path(diretorio, "caged_movimentacoes_mensais.parquet")
+preparar_asset <- function(dados) {
+  arquivo <- file.path(tempdir(), "caged_movimentacoes_mensais.parquet")
   arrow::write_parquet(dados, arquivo)
   arquivo
 }
@@ -422,9 +421,23 @@ executar <- function(args = commandArgs(trailingOnly = TRUE)) {
   if (length(faltam)) stop("Instale os pacotes: ", paste(faltam, collapse = ", "))
   if (!nzchar(localizar_7zip())) stop("Instale o 7-Zip para conferir a integridade dos arquivos")
   dados <- obter_caged()
-  arquivo <- preparar_asset(dados, "dados")
-  if ("--publicar" %in% args) publicar(arquivo)
-  message("Parquet validado: ", normalizePath(arquivo, winslash = "/"))
+  arquivo <- preparar_asset(dados)
+  if ("--publicar" %in% args) {
+    on.exit({
+      # Fecha a leitura do upload antes do unlink no Windows.
+      gc()
+      conexoes <- showConnections()
+      caminhos <- normalizePath(conexoes[, "description"], winslash = "/", mustWork = FALSE)
+      destino <- normalizePath(arquivo, winslash = "/", mustWork = FALSE)
+      ids <- rownames(conexoes)[conexoes[, "class"] == "file" & caminhos == destino]
+      for (id in ids) close(getConnection(as.integer(id)))
+      unlink(arquivo)
+    }, add = TRUE)
+    publicar(arquivo)
+    message("Parquet publicado na release ", release_tag)
+  } else {
+    message("Parquet validado: ", normalizePath(arquivo, winslash = "/"))
+  }
   invisible(arquivo)
 }
 
