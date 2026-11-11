@@ -206,7 +206,7 @@ df_long <- df_wide |>
         ignore.case = TRUE
       ) ~ "ranking_nacional",
 
-      TRUE ~ "valor"
+      TRUE ~ "indice"
     ),
 
     # Limpeza do nome do indicador.
