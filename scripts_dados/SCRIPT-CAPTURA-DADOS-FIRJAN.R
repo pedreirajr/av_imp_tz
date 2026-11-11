@@ -8,7 +8,8 @@
   "readr",
   "arrow",
   "piggyback",
-  "geobr"
+  "geobr",
+  "gh"
 )
 
 .falta <- .pkgs[
@@ -26,10 +27,11 @@ invisible(
 
 # 2. DOWNLOAD DOS DADOS DA FIRJAN
 
-# URL obtida na página do IFGF da Firjan.
-# Para localizar: abrir a página no navegador, pressionar F12,
-# acessar Network (Rede), filtrar por Fetch/XHR e recarregar.
+# Página do IFGF Firjan: https://www.firjan.com.br/ifgf/
+# Para localizar a URL dos dados: abrir a página no navegador, pressionar F12,
+# acessar a aba Network (Rede), filtrar por Fetch/XHR e recarregar.
 # Identificar a requisição que retorna o JSON dos indicadores.
+# Nota: o nome do arquivo JSON (ex: dados-2025-final.json) muda a cada edição do índice.
 
 url <- paste0(
   "https://firjan.com.br/data/files/",
@@ -65,12 +67,12 @@ stopifnot(
     all(c("Ano", "IdCidade") %in% names(df_wide))
 )
 
-# Mantém IdCidade para a exclusão de Boa Esperança do Norte.
-# Esta cidade foi oficialmente inaugarada em 2025. Dados do geobr são de 2022. Necessária a exclusão.
+# Mantém IdCidade para posterior exclusão.
 df_wide <- df_wide |>
   mutate(
     IdCidade = as.character(IdCidade)
   )
+
 
 # 4. ADEQUAÇÃO DOS DADOS COM O GEOBR
 
@@ -117,8 +119,9 @@ df_wide <- df_wide |>
 
 # 5. EXCLUSÃO E VALIDAÇÃO DOS MUNICÍPIOS
 
-# Boa Esperança do Norte (MT), IdCidade 510183:
-
+# Boa Esperança do Norte (MT) - IdCidade 510183:
+# O município é mapeado no geobr (código 5101837), porém todos os 12 anos de dados 
+# constam como "Dados Indisponíveis" na base da Firjan. Necessária a exclusão manual.
 df_wide <- df_wide |>
   filter(IdCidade != "510183")
 
@@ -171,22 +174,23 @@ df_long <- df_wide |>
   pivot_longer(
     cols = -all_of(id_vars_padrao),
     names_to = "Indicador_ou_Ranking",
-    values_to = "Valor",
-    values_transform = list(Valor = as.character)
+    values_to = "valor",
+    values_transform = list(valor = as.character)
   ) |>
+  rename(ano = Ano) |>
   mutate(
-    Ano = as.integer(Ano),
+    ano = as.integer(ano),
     code_muni = as.integer(code_muni),
     code_state = as.integer(code_state),
 
     # Tratamento do valor ausente utilizado pela Firjan.
-    Valor_clean = na_if(
-      Valor,
+    valor_clean = na_if(
+      valor,
       "Dados Indisponíveis"
     ),
 
     # Conversão para valor numérico.
-    Valor = as.numeric(Valor_clean),
+    valor = as.numeric(valor_clean),
 
     # Classificação dos indicadores e rankings.
     tipo = case_when(
@@ -229,7 +233,7 @@ df_long <- df_wide |>
   ) |>
   select(
     -Indicador_ou_Ranking,
-    -Valor_clean
+    -valor_clean
   )
 
 
@@ -249,14 +253,14 @@ print(
   head(
     df_long |>
       select(
-        Ano,
+        ano,
         code_muni,
         code_state,
         abbrev_state,
         name_muni,
         indicador,
         tipo,
-        Valor
+        valor
       ),
     15
   )
@@ -295,13 +299,12 @@ stopifnot(file.exists(parquet_path))
 
 # 9. UPLOAD VIA PIGGYBACK
 
-# O upload exige GITHUB_PAT configurado no ambiente R.
-# Não coloque o token diretamente no código versionado.
+# Verifica se há token do GitHub autenticado (via GITHUB_PAT ou gitcreds/gh).
 
-if (!nzchar(Sys.getenv("GITHUB_PAT"))) {
+if (!nzchar(gh::gh_token())) {
   stop(
-    "GITHUB_PAT não está configurado. ",
-    "Configure o token antes de executar o upload."
+    "Nenhum token do GitHub foi detectado. ",
+    "Configure a variável GITHUB_PAT ou registre as credenciais via gitcreds/gh antes de executar."
   )
 }
 
@@ -334,5 +337,7 @@ tryCatch(
       "O arquivo Parquet foi preservado em: ",
       parquet_path
     )
+
+    stop("Interrompendo script devido à falha no upload para o GitHub.", call. FALSE)
   }
 )
