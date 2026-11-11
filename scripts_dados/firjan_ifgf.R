@@ -338,6 +338,6 @@ tryCatch(
       parquet_path
     )
 
-    stop("Interrompendo script devido à falha no upload para o GitHub.", call. FALSE)
+    stop("Interrompendo script devido à falha no upload para o GitHub.", call. = FALSE)
   }
 )
