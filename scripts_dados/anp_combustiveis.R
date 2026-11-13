@@ -3,6 +3,14 @@
 # Execute a partir da raiz do projeto:
 # source("scripts_dados/Dados_da_ANP/anp_combustiveis.R", encoding = "UTF-8")
 # rodar_pipeline_anp(publicar = TRUE)
+#
+# Observacoes sobre a fonte e o tratamento:
+# - Municipio ausente em determinado ano nao representa venda igual a zero; a
+#   ANP publica apenas os municipios com registro de venda.
+# - Localidades como Salobrinho, Monte Dourado e as demais regras conferidas
+#   abaixo sao incorporadas e somadas ao municipio ao qual pertencem.
+# - Na fonte da ANP, o GLP de 2018 repete exatamente municipios e valores de
+#   2017 (9.046 linhas identicas quando a coluna de ano e desconsiderada).
 
 URL_ANP <- paste0(
   "https://www.gov.br/anp/pt-br/centrais-de-conteudo/dados-abertos/",
@@ -272,7 +280,12 @@ baixar_arquivos_anp <- function(configuracao, dir_raw) {
     configuracao$nome_raw,
     function(url, nome_raw) {
       destino <- file.path(dir_raw, nome_raw)
-      resposta <- httr::GET(url, httr::write_disk(destino, overwrite = TRUE))
+      resposta <- httr::RETRY(
+        "GET",
+        url,
+        httr::write_disk(destino, overwrite = TRUE),
+        times = 5
+      )
 
       if (httr::status_code(resposta) != 200L) {
         stop(
@@ -314,22 +327,19 @@ ler_dados_anp <- function(caminho_raw, tipo) {
   }
 
   dados <- dados_brutos |>
-    dplyr::mutate(ano = as.integer(.data[["ANO"]]))
-
-  if (anyNA(dados$ano)) {
-    stop("Ha ano ausente ou invalido em ", basename(caminho_raw), ".", call. = FALSE)
-  }
-
-  dados <- dados |>
-    dplyr::filter(ano >= 2010L) |>
     dplyr::transmute(
-      ano,
+      ano = as.integer(.data[["ANO"]]),
       code_muni_anp = as.character(.data[["C\u00d3DIGO IBGE"]]),
       name_region_anp = stringr::str_squish(.data[["GRANDE REGI\u00c3O"]]),
       abbrev_state_anp = stringr::str_squish(.data[["UF"]]),
       name_muni_anp = stringr::str_squish(.data[["MUNIC\u00cdPIO"]]),
       dplyr::across(dplyr::all_of(colunas_medidas))
-    )
+    ) |>
+    dplyr::filter(ano >= 2010L)
+
+  if (anyNA(dados$ano)) {
+    stop("Ha ano ausente ou invalido em ", basename(caminho_raw), ".", call. = FALSE)
+  }
 
   numero_duplicadas <- sum(duplicated(dados))
   if (numero_duplicadas > 0L) {
@@ -647,6 +657,9 @@ processar_arquivo_anp <- function(
       dplyr::rename(vendas_litros = VENDAS)
   }
 
+  dados <- dados |>
+    dplyr::mutate(code_muni = as.integer(code_muni))
+
   if (anyDuplicated(dados)) {
     stop(
       "O tratamento produziu linhas integralmente duplicadas em ",
@@ -694,8 +707,22 @@ publicar_parquets_anp <- function(arquivos_parquet) {
     )
   }
 
+  nomes_antigos <- stringr::str_replace(
+    basename(arquivos_parquet),
+    "\\.parquet$",
+    "-tratado.parquet"
+  )
+
+  for (nome_antigo in nomes_antigos) {
+    piggyback::pb_delete(
+      file = nome_antigo,
+      repo = REPOSITORIO_ANP,
+      tag = TAG_RELEASE_ANP
+    )
+  }
+
   message(
-    "Publicacao concluida na release '", TAG_RELEASE_ANP,
+    "Publicacao concluida e assets antigos removidos da release '", TAG_RELEASE_ANP,
     "' de ", REPOSITORIO_ANP, "."
   )
 }

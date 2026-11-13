@@ -13,6 +13,130 @@ knitr::opts_chunk$set(
 
 <!-- # Repositório de Dados e Códigos do Projeto CNPq "Avaliação dos impactos socioeconômicos e ambientais das políticas de Tarifa Zero no Brasil" -->
 
-Neste repositórios organizermos os scripts de geração/limpeza e análise dos dados do projeto. Nos assets do release [Dados do Projeto](https://github.com/pedreirajr/av_imp_tz/releases/tag/data) estarão os dados processados do projeto para uso nas análises.
+Neste repositório organizamos os scripts de geração/limpeza e análise dos dados do projeto. Nos assets do release [Dados do Projeto](https://github.com/pedreirajr/av_imp_tz/releases/tag/data) estarão os dados processados do projeto para uso nas análises.
 
+## Como adicionar uma nova base de dados
 
+Cada base entra no projeto por meio de um script em R que baixa os dados da fonte original, faz o tratamento e publica o resultado como asset da release [`data`](https://github.com/pedreirajr/av_imp_tz/releases/tag/data). O repositório guarda **apenas o código que produz os dados**, pois os **dados ficam na release**.
+
+### 1. Script
+
+- Escreva o script em um único arquivo em `scripts_dados/` (ou em um script principal orquestrador que chame os demais, se a base exigir várias etapas e o código ficar muito longo).
+- Use nome de arquivo em minúsculas, sem acentos nem espaços, que identifique a base. Exs.: `frota_denatran.R`, `mercado_trabalho.R`.
+- O script deve rodar do início ao fim numa sessão limpa, a partir da raiz do projeto (`Rscript scripts_dados/<nome>.R`), sem passos manuais, sem caminhos da sua máquina e sem variáveis definidas fora dele.
+- Baixe os dados da **fonte oficial** e indique no topo do script (ou na documentação) o link da página de onde vêm os dados.
+- Se a fonte for instável ou tiver limite de acesso, trate falhas de download (por exemplo, com novas tentativas) em vez de seguir com dados incompletos sem avisar.
+- Retire restos de rascunho, código comentado sem uso e variáveis não utilizadas antes de abrir o PR.
+
+### 2. Padrão dos dados de saída
+
+- Lembre-se que a **unidade de análise: município.** Sempre que a fonte permitir, entregue os dados em nível municipal.
+- **Identificadores no padrão do [`geobr`](https://ipeagit.github.io/geobr/):**
+  - `code_muni`: código IBGE de 7 dígitos, como inteiro;
+  - `name_muni`, `abbrev_state`, `code_state`: obtidos do `geobr` a partir do `code_muni` e não da fonte original (as grafias da fonte costumam divergir).
+- **Tempo em colunas separadas e inteiras:** `ano` e, quando houver, `mes`. Evite datas guardadas como texto ou número (`AAAAMM`, `date` com o ano).
+- **Nomes de colunas** em minúsculas e no formato `snake_case`.
+- **Recorte temporal:** preferencialmente a partir de 2010, salvo justificativa.
+- **Formato:** Parquet (pacote `arrow`), em um único arquivo com nome fixo e descritivo, sem acentos (ex.: `frota_mensal_municipio.parquet`).
+
+### 3. Checagens antes de publicar
+
+O script deve verificar o resultado e **parar com erro** (`stopifnot()` ou `stop()`) quando algo estiver errado, em vez de apenas emitir uma mensagem:
+
+- sem linhas duplicadas (`distinct()` e checagem pela chave `code_muni` × `ano` × `mes`);
+- todo `code_muni` existente no `geobr`, sem casamentos com município errado (códigos antigos podem ter dígito verificador diferente);
+- sem valores impossíveis (negativos onde não deveriam existir, mudanças de escala entre anos);
+- totais conferidos contra os dados brutos ou contra totais publicados pela fonte;
+- cobertura conferida: anos, meses e UFs esperados estão presentes.
+
+Observe que **ausência de dado não é zero.** Município ou período que não aparece na fonte deve ficar como `NA` ou fora da tabela, nunca preenchido com 0. Lacunas e problemas da própria fonte (meses faltantes, arquivos corrompidos, anos repetidos) devem ser documentados.
+
+### 4. Publicação na release
+
+Nada é gravado no diretório do repositório.[^1] Gere o arquivo em uma pasta temporária, envie com o [`piggyback`](https://docs.ropensci.org/piggyback/) e apague o temporário:
+
+[^1]: O Git guarda no histórico uma cópia de cada versão de cada arquivo commitado, para sempre. Com código isso é não custa muito, porque as versões são texto e diferem pouco entre si. Já um arquivo de dados binário, como o Parquet, praticamente não se comprime em relação à versão anterior, pois cada reprocessamento da base acrescenta ao histórico o tamanho inteiro do arquivo, mesmo que a versão antiga seja apagada depois. O repositório fica cada vez mais pesado para clonar e baixar, esbarra nos limites do GitHub (aviso a partir de 50 MB e bloqueio acima de 100 MB por arquivo) e só se livra desses arquivos reescrevendo o histórico, o que atrapalha todos os colaboradores. Nos assets da release, um upload com `overwrite = TRUE` substitui o arquivo anterior sem acumular versões, e cada asset pode ter até 2 GB. Gravar em `tempdir()` também evita que um arquivo de dados seja commitado por engano.
+
+``` r
+arquivo <- file.path(tempdir(), "nome_da_base.parquet")
+arrow::write_parquet(dados, arquivo)
+
+piggyback::pb_upload(
+  arquivo,
+  repo = "pedreirajr/av_imp_tz",
+  tag = "data",
+  overwrite = TRUE
+)
+
+unlink(arquivo)
+```
+
+- Use sempre a release `data`, que já existe. O script **não** deve criar novas releases.
+- Use `file.path(tempdir(), "<nome fixo>")` e não `tempfile()`, porque o nome do asset na release é o nome do arquivo.
+- Não esconda falhas do upload (por exemplo, com `tryCatch()` que só imprime uma mensagem).
+- Se mudar o nome de um asset, remova o antigo da release para não deixar arquivos órfãos.
+- A publicação exige um token do GitHub (`GITHUB_PAT`). Guarde-o no arquivo `.Renviron` na raiz do projeto, que está no `.gitignore` e nunca deve ser versionado (ou configure-o com o pacote `gitcreds`).
+
+### 5. Dicionário e documentação
+
+Toda base publicada vem acompanhada de dois arquivos, ambos com o **mesmo nome do script** (ex.: `frota_denatran.R` → `frota_denatran.md`). Podem ser escritos em `.md`, `.Rmd` ou `.qmd`.
+
+```         
+scripts_dados/
+├── frota_denatran.R        # script que gera e publica a base
+├── dics/
+│   └── frota_denatran.md   # dicionário: o que é cada coluna
+└── docs/
+    └── frota_denatran.md   # documentação: como a base foi feita e o que é preciso saber antes de usá-la
+```
+
+#### 5.1 Dicionário (`scripts_dados/dics/`)
+
+Descreve o arquivo publicado, para quem vai usá-lo sem ler o script:
+
+- nome do asset na release, nível (ex.: município × ano × mês) e chave única da tabela;
+- período e abrangência cobertos (anos, meses, UFs);
+- uma linha por coluna, numa tabela com: **nome**, **tipo** (`integer`, `double`, `character`), **unidade** (litros, R\$ correntes, número de vínculos, veículos etc.), **descrição** e **valores possíveis** (para colunas categóricas, liste as categorias e o que significam);
+- significado de `NA` e de códigos especiais em cada coluna (ex.: `code_state = 99` e `abbrev_state = "NI"` para UF não identificada no CAGED).
+
+Exemplo de tabela:
+
+| coluna | tipo | unidade | descrição |
+|------------------|------------------|------------------|------------------|
+| `code_muni` | integer | — | código IBGE do município (7 dígitos), padrão `geobr` |
+| `ano` | integer | — | ano de referência |
+| `mes` | integer | — | mês de referência (1–12) |
+| `admissoes` | integer | vínculos | admissões registradas no mês |
+
+#### 5.2 Documentação (`scripts_dados/docs/`)
+
+Explica como a base foi construída e, principalmente, **o que quem for analisar precisa saber para não tirar conclusões erradas**. Deve conter:
+
+- fonte, link da página de origem e data da extração;
+- o que o script faz, em poucos passos, e as decisões de tratamento tomadas (recortes, agregações, filtros);
+- requisitos para rodar (pacotes, contas, tokens, programas externos);
+- **problemas, lacunas e cuidados**, com números concretos: quantas linhas, quais anos, quais municípios, e como cada caso foi tratado (corrigido, removido, mantido e sinalizado).
+
+Exemplos do tipo de problema que deve ser registrado, encontrados nas revisões dos PRs:
+
+- **Dados repetidos ou copiados na fonte:** no GLP da ANP, o ano de 2018 é uma cópia exata de 2017 na própria fonte (as 9.046 linhas são idênticas). Ao comparar anos, essa repetição precisa estar documentada.
+- **Ausência não é zero:** no etanol da ANP, cerca de 4.600 municípios por ano não aparecem. Isso indica município sem registro de venda, não venda igual a zero, e deve ser dito explicitamente. O mesmo vale para o CAGED: competência que falta é lacuna, não mês sem movimentação.
+- **Códigos de município inconsistentes**: na ANP, códigos dos anos 1990 vinham com dígito verificador errado (ex.: Ariquemes 1100025 em vez de 1100023), e alguns códigos casavam em silêncio com o município errado (etanol de 2015–2016 com Ariquemes usando o código de Cacoal). Documente quantos casos houve e como foram resolvidos.
+- **Linhas duplicadas:** a ANP trazia cerca de 15 mil linhas duplicadas por inteiro em etanol, gasolina e diesel. Registre que foram removidas e quantas eram.
+- **Períodos ausentes ou parciais:** na frota do DENATRAN, jan/2024 não existe na fonte e Alagoas só tem dados a partir de nov/2006. No CAGED, mar/2011 e o arquivo de ajustes de out/2010 estão corrompidos tanto no FTP oficial quanto no espelho, e por isso ficaram fora.
+- **Quebras de série.**: no CAGED, a metodologia muda em 2020 (Novo CAGED) e os valores antes e depois de 2020 não são diretamente comparáveis.
+- **Valores estranhos que vêm da fonte:** no CAGED há valores negativos em poucas linhas (ex.: admissões = −1 em 2020-01 num município do MA), causados por exclusões (EXC) da própria base. Na série estadual da SEI, ago/2009 tinha erro de escala nos estados do Norte (AC 841000 em vez de 841).
+- **Totais que não fecham:** no CAGED, o total Brasil não era igual à soma das UFs porque havia movimentos sem UF identificada. Explique a diferença em vez de chamá-la de "rara".
+- **Municípios novos ou sem dado:** Boa Esperança do Norte (MT, 5101837), município recente, aparece na Firjan só com "Dados Indisponíveis" em todos os anos. Registre os municípios afetados e o motivo real, conferido nos dados.
+- **Nomes divergentes.** Na frota do DENATRAN, 60 nomes de município da fonte diferem do `geobr` (ex.: "D'Oeste" × "d'Oeste", "Santa Isabel" × "Santa Izabel"). Isso reforça a regra de usar os nomes do `geobr`, e não os da fonte.
+
+Se um problema for descoberto depois da publicação, atualize a documentação no mesmo PR que corrigir a base, ou abra um PR só com a nota.
+
+### 6. Issue e Pull Request
+
+- Antes de começar, **abra uma issue** descrevendo a base que será incluída: fonte, variáveis de interesse, nível geográfico e período pretendidos. A issue serve para combinar o escopo com a equipe antes do trabalho e evita que duas pessoas façam a mesma base. Atribua a issue a você mesmo (*Assignees*) para que todos saibam quem está cuidando dela.
+- No texto do PR, **vincule a issue** com uma palavra-chave do GitHub seguida do número, por exemplo `Resolve #3`. O GitHub só reconhece palavras-chave em inglês (`Resolve`, `Resolves`, `Closes`, `Fixes` e variações), e o número precisa vir **logo depois** da palavra: `Resolve #3` funciona, mas "Resolve a issue #3" não fecha a issue. Com a palavra-chave, o PR aparece ligado à issue e a issue é fechada automaticamente quando o PR for mergeado.
+- Crie uma branch a partir da `main` e abra o PR com **apenas** os arquivos da nova base. Alterações fora do escopo (outras bases, `.gitignore` de ferramentas pessoais) vão em PRs separados.
+- Na descrição do PR, informe o nome do asset publicado, o número de linhas, o período e as lacunas conhecidas. Confira que a descrição corresponde ao que está no dado.
+- Publique o asset na release antes de pedir revisão: a revisão confere o arquivo publicado, e não só o código.
+- Não inclua coautoria de ferramentas de IA nos commits (`Co-Authored-By: ...`) e revise textos gerados por essas ferramentas antes de enviar.

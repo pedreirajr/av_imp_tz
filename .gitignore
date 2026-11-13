@@ -2,3 +2,7 @@
 .Rhistory
 .RData
 .Ruserdata
+
+# Segredos (token do GitHub p/ o piggyback etc.) - nunca versionar
+.Renviron
+.env
