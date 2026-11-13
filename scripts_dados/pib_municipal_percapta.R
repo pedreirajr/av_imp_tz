@@ -1,7 +1,7 @@
 # Pipeline de coleta, tratamento e publicacao do PIB municipal e PIB per capita.
 #
 # Execute a partir da raiz do projeto:
-# source("scripts_dados/Dados_do_IBGE/pib_municipal_percapta.R")
+# source("scripts_dados/pib_municipal_percapta.R")
 # rodar_pipeline_pib_municipal_percapta(publicar = TRUE)
 #
 # Fonte oficial:
