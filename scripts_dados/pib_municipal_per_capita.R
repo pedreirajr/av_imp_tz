@@ -1,8 +1,8 @@
 # Pipeline de coleta, tratamento e publicacao do PIB municipal e PIB per capita.
 #
 # Execute a partir da raiz do projeto:
-# source("scripts_dados/pib_municipal_percapta.R")
-# rodar_pipeline_pib_municipal_percapta(publicar = TRUE)
+# source("scripts_dados/pib_municipal_per_capita.R")
+# rodar_pipeline_pib_municipal_per_capita(publicar = TRUE)
 #
 # Fonte oficial:
 # https://ftp.ibge.gov.br/Pib_Municipios/2022_2023/base/
@@ -24,7 +24,7 @@ URL_ARQUIVO_PIB <- paste0(
 
 REPOSITORIO_PIB <- "pedreirajr/av_imp_tz"
 TAG_RELEASE_PIB <- "data"
-NOME_ASSET_PIB <- "pib_municipal_percapta.parquet"
+NOME_ASSET_PIB <- "pib_municipal_per_capita.parquet"
 NOME_PLANILHA_PIB <- "PIB dos Municípios"
 ANO_REFERENCIA_GEOBR_PIB <- 2022L
 
@@ -759,10 +759,10 @@ publicar_parquet_pib <- function(caminho_parquet) {
   )
 }
 
-rodar_pipeline_pib_municipal_percapta <- function(publicar = TRUE) {
+rodar_pipeline_pib_municipal_per_capita <- function(publicar = TRUE) {
   verificar_pacotes_pib(publicar = publicar)
 
-  diretorio_trabalho <- tempfile("pib_municipal_percapta_")
+  diretorio_trabalho <- tempfile("pib_municipal_per_capita_")
   dir_raw <- file.path(diretorio_trabalho, "raw")
   dir_parquet <- file.path(diretorio_trabalho, "parquet")
   dir.create(diretorio_trabalho, recursive = TRUE, showWarnings = FALSE)

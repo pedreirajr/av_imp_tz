@@ -2,7 +2,7 @@
 
 ## Identificação da base
 
-- **Script produtor:** `scripts_dados/Dados_da_ANP/anp_combustiveis.R`
+- **Script produtor:** `scripts_dados/anp_combustiveis.R`
 - **Release:** `data`, no repositório `pedreirajr/av_imp_tz`
 - **Recorte temporal:** 2010 a 2024 na extração auditada em 13/11/2026
 - **Abrangência geográfica:** municípios brasileiros com registro de venda na fonte da ANP

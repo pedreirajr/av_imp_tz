@@ -2,7 +2,7 @@
 
 ## Visão geral
 
-O script `scripts_dados/Dados_da_ANP/anp_combustiveis.R` baixa, trata e publica quatro séries anuais municipais da Agência Nacional do Petróleo, Gás Natural e Biocombustíveis (ANP): etanol hidratado, gasolina C, GLP e óleo diesel.
+O script `scripts_dados/anp_combustiveis.R` baixa, trata e publica quatro séries anuais municipais da Agência Nacional do Petróleo, Gás Natural e Biocombustíveis (ANP): etanol hidratado, gasolina C, GLP e óleo diesel.
 
 Os dados são recortados a partir de 2010, reconciliados com a referência municipal do `geobr`, gravados em Parquet com compressão Snappy e, quando solicitado, publicados como assets da release `data` do repositório `pedreirajr/av_imp_tz`.
 
@@ -43,8 +43,7 @@ O dicionário completo das colunas está em `scripts_dados/dics/anp_combustiveis
 10. Soma registros que passam a pertencer ao mesmo município–ano depois das correções, preservando `NA` quando todos os componentes são ausentes.
 11. Para GLP, transforma `P13` e `OUTROS` do formato largo para o formato longo, criando `tipo_vasilhame` e `valor_kg`.
 12. Valida a chave única de cada asset, grava os Parquets com compressão Snappy e, se `publicar = TRUE`, envia-os à release.
-13. Depois de uma publicação bem-sucedida, tenta remover os assets antigos com sufixo `-tratado.parquet`.
-14. Remove todo o diretório temporário ao encerrar, inclusive quando ocorre erro.
+13. Remove todo o diretório temporário ao encerrar, inclusive quando ocorre erro.
 
 ## Tratamento espacial
 
@@ -186,7 +185,7 @@ A partir da raiz do projeto:
 
 ```r
 source(
-  "scripts_dados/Dados_da_ANP/anp_combustiveis.R",
+  "scripts_dados/anp_combustiveis.R",
   encoding = "UTF-8"
 )
 
@@ -201,7 +200,7 @@ O script não é executado automaticamente ao ser carregado com `source()`. É n
 
 ## Publicação e arquivos temporários
 
-Os CSVs e Parquets são criados dentro de um diretório temporário. Com `publicar = TRUE`, cada Parquet é enviado com sobrescrita para a release `data`. Em seguida, o script solicita a remoção dos quatro nomes antigos terminados em `-tratado.parquet`, evitando assets órfãos após a mudança de nomenclatura.
+Os CSVs e Parquets são criados dentro de um diretório temporário. Com `publicar = TRUE`, cada Parquet é enviado com sobrescrita para a release `data`.
 
 Com `publicar = FALSE`, os Parquets são gerados e validados, mas não são mantidos: o diretório temporário é apagado ao final. Esse modo serve para verificar o pipeline sem alterar a release.
 

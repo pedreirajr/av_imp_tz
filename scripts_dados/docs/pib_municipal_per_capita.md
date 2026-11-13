@@ -2,7 +2,7 @@
 
 ## 1. Objetivo
 
-O script `scripts_dados/Dados_do_IBGE/pib_municipal_percapta.R` baixa, valida, trata e publica a base municipal do Produto Interno Bruto do IBGE. O resultado tem uma linha por município e ano, de 2010 a 2023, e contém apenas os 14 campos definidos no dicionário.
+O script `scripts_dados/pib_municipal_per_capita.R` baixa, valida, trata e publica a base municipal do Produto Interno Bruto do IBGE. O resultado tem uma linha por município e ano, de 2010 a 2023, e contém apenas os 14 campos definidos no dicionário.
 
 O pipeline segue o padrão do repositório e a arquitetura do script da ANP: funções independentes para cada etapa, um orquestrador final, processamento em diretório temporário, validações que interrompem a execução e publicação opcional na release `data`.
 
@@ -19,7 +19,7 @@ O ZIP oficial contém um único `.xlsx`. O download usa `httr::RETRY()` com até
 
 ## 3. Saída
 
-- **Asset:** `pib_municipal_percapta.parquet`.
+- **Asset:** `pib_municipal_per_capita.parquet`.
 - **Release:** tag `data` do repositório `pedreirajr/av_imp_tz`.
 - **Formato:** Parquet, compressão Snappy.
 - **Nível:** município × ano.
@@ -59,15 +59,15 @@ A partir da raiz do repositório:
 
 ```r
 source(
-  "scripts_dados/Dados_do_IBGE/pib_municipal_percapta.R",
+  "scripts_dados/pib_municipal_per_capita.R",
   encoding = "UTF-8"
 )
 
 # Teste completo sem upload
-rodar_pipeline_pib_municipal_percapta(publicar = FALSE)
+rodar_pipeline_pib_municipal_per_capita(publicar = FALSE)
 
 # Processamento e publicação na release data
-rodar_pipeline_pib_municipal_percapta(publicar = TRUE)
+rodar_pipeline_pib_municipal_per_capita(publicar = TRUE)
 ```
 
 Todos os arquivos brutos e o Parquet são produzidos em um diretório temporário e removidos ao final, inclusive quando ocorre erro. Nenhum dado é gravado no diretóio versionado.
@@ -99,7 +99,7 @@ readxl::read_excel(
 
 Assim, as 43 colunas entram como `character`, inclusive ano, códigos e medidas. A tipagem só ocorre depois da verificação do leiaute. Essa decisão evita inferência prematura, perda de códigos e conversão silenciosa de campos.
 
-As quebras de linha e espaços repetidos dos cabeçalhos do Excel são normalizados. Em seguida, `janitor::clean_names()` produz nomes intermediários em `snake_case`. O DE-PARA manual transforma apenas os 14 campos finais nos nomes curtos documentados em `scripts_dados/dics/dicionario_pib.md`.
+As quebras de linha e espaços repetidos dos cabeçalhos do Excel são normalizados. Em seguida, `janitor::clean_names()` produz nomes intermediários em `snake_case`. O DE-PARA manual transforma apenas os 14 campos finais nos nomes curtos documentados em `scripts_dados/dics/pib_municipal_per_capita.md`.
 
 ### 6.4 Tipagem controlada
 
@@ -230,7 +230,7 @@ Esses valores constam no arquivo oficial e são preservados. O caso mais importa
 
 ## 9. Dicionário de dados
 
-O esquema final, o DE-PARA completo, tipos, unidades, categorias e significado de `NA` estão em `scripts_dados/dics/dicionario_pib.md`.
+O esquema final, o DE-PARA completo, tipos, unidades, categorias e significado de `NA` estão em `scripts_dados/dics/pib_municipal_per_capita.md`.
 
 ## 10. Solução de problemas
 
@@ -264,4 +264,4 @@ Use `publicar = FALSE` para testar transformação e validações. Configure o t
 - confirmar 100.260 ausências metodológicas e 113 valores negativos;
 - configurar `GITHUB_PAT` sem imprimi-lo;
 - executar com `publicar = TRUE`;
-- conferir `pib_municipal_percapta.parquet` na release `data`.
+- conferir `pib_municipal_per_capita.parquet` na release `data`.

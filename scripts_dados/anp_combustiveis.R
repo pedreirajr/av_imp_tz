@@ -1,7 +1,7 @@
 # Pipeline de coleta, tratamento e publicacao dos dados municipais da ANP.
 #
 # Execute a partir da raiz do projeto:
-# source("scripts_dados/Dados_da_ANP/anp_combustiveis.R", encoding = "UTF-8")
+# source("scripts_dados/anp_combustiveis.R", encoding = "UTF-8")
 # rodar_pipeline_anp(publicar = TRUE)
 #
 # Observacoes sobre a fonte e o tratamento:
@@ -334,12 +334,14 @@ ler_dados_anp <- function(caminho_raw, tipo) {
       abbrev_state_anp = stringr::str_squish(.data[["UF"]]),
       name_muni_anp = stringr::str_squish(.data[["MUNIC\u00cdPIO"]]),
       dplyr::across(dplyr::all_of(colunas_medidas))
-    ) |>
-    dplyr::filter(ano >= 2010L)
+    )
 
   if (anyNA(dados$ano)) {
     stop("Ha ano ausente ou invalido em ", basename(caminho_raw), ".", call. = FALSE)
   }
+
+  dados <- dados |>
+    dplyr::filter(ano >= 2010L)
 
   numero_duplicadas <- sum(duplicated(dados))
   if (numero_duplicadas > 0L) {
@@ -707,22 +709,8 @@ publicar_parquets_anp <- function(arquivos_parquet) {
     )
   }
 
-  nomes_antigos <- stringr::str_replace(
-    basename(arquivos_parquet),
-    "\\.parquet$",
-    "-tratado.parquet"
-  )
-
-  for (nome_antigo in nomes_antigos) {
-    piggyback::pb_delete(
-      file = nome_antigo,
-      repo = REPOSITORIO_ANP,
-      tag = TAG_RELEASE_ANP
-    )
-  }
-
   message(
-    "Publicacao concluida e assets antigos removidos da release '", TAG_RELEASE_ANP,
+    "Publicacao concluida na release '", TAG_RELEASE_ANP,
     "' de ", REPOSITORIO_ANP, "."
   )
 }

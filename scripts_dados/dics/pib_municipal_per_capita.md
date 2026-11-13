@@ -2,7 +2,7 @@
 
 ## Identificação da base
 
-- **Asset publicado:** `pib_municipal_percapta.parquet`
+- **Asset publicado:** `pib_municipal_per_capita.parquet`
 - **Fonte:** IBGE, Produto Interno Bruto dos Municípios, base 2010–2023.
 - **Nível de observação:** município × ano.
 - **Chave única:** `ano` × `code_muni`.
