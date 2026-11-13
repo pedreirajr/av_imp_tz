@@ -20,7 +20,6 @@ for (tentativa in 1:5) {
   resp <- tryCatch(
     GET(
       url_dados,
-      config(ssl_verifypeer = FALSE),
       write_disk(arquivo_zip, overwrite = TRUE),
       timeout(120)
     ),
@@ -48,19 +47,10 @@ if (is.na(arquivo_csv) || !file.exists(arquivo_csv)) {
 dados_brutos <- read_delim(
   arquivo_csv,
   delim = ";",
-  locale = locale(decimal_mark = ",", grouping_mark = ".", encoding = "Latin1"),
+  locale = locale(decimal_mark = ",", grouping_mark = ".", encoding = "UTF-8"),
   col_select = c(exercicio, Ente, per_acertos),
   show_col_types = FALSE
 )
-
-# Se o delimitador não for ';', tenta leitura padrão com ','
-if (ncol(dados_brutos) < 3) {
-  dados_brutos <- read_csv(
-    arquivo_csv,
-    col_select = c(exercicio, Ente, per_acertos),
-    show_col_types = FALSE
-  )
-}
 
 # Referência oficial de municípios no padrão geobr
 muni_geobr <- read_municipality(year = 2022, simplified = TRUE, showProgress = FALSE) |>
