@@ -1,24 +1,37 @@
 # Executar da raiz: Rscript scripts_dados/bolsa_familia.R
 # Gera bolsa_familia_mensal_municipio.parquet em tempdir() durante a sessão R.
 # Publicar e apagar o temporário: Rscript scripts_dados/bolsa_familia.R --publicar
-# Forçar nova consulta no BigQuery ignorando cache local: --sem-cache
+# Reaproveitar cache local da última consulta BigQuery: --usar-cache
 # Dependências: bigrquery, dplyr, geobr, sf, arrow, jsonlite;
 # Publicação: piggyback, gh e httr, com autenticação do GitHub.
 #
 # Pagamentos mensais do Bolsa Família e do Auxílio Brasil por município a partir
 # da tabela tratada da CGU / Portal da Transparência na Base dos Dados
 # (basedosdados.br_cgu_beneficios_cidadao):
-# - bolsa_familia_pagamento (competências completas de 2013-01 a 2021-11)
+# - bolsa_familia_pagamento (competências completas de 2013-01 a 2021-10)
 # - auxilio_brasil (competências completas de 2021-11 a 2023-02, Lei n. 14.284/2021;
 #   inclui parcelas retroativas de 2020-08 e 2021-03 a 2021-10)
 # - novo_bolsa_familia (competências completas a partir de 2023-03, Lei n. 14.601/2023;
 #   na camada aberta da Base dos Dados, disponível até 2026-04 devido a Row-Level Security)
 #
+# Atenção aos valores do Auxílio Brasil (2021-12 a 2023-02): a tabela auxilio_brasil
+# da CGU/Base dos Dados (assim como a série VAL_PBF12 do Ipeadata/MDS) registra apenas
+# a folha regular e não inclui o Benefício Extraordinário (piso de R$ 400 em 2021-12 a
+# 2022-06 e adicional temporário de R$ 200 de 2022-08 a 2023-02); além disso, a partir
+# de 2022-11 a parcela líquida reflete descontos de empréstimo consignado. Logo,
+# valor_total e valor_medio de 2021-12 a 2023-02 estão subestimados e não são
+# diretamente comparáveis com os demais períodos (ver scripts_dados/docs/bolsa_familia.md).
+#
 # A série inicia em 2013-01 porque a CGU passou a disponibilizar as folhas mensais
 # nesse período; parcelas retroativas de 2012-02 a 2012-12 pagas na folha de 2013
 # são parciais (82 a 3.936 municípios) e ficam fora do corte >= 2013.
-# Em 2021-11 há sobreposição de competência entre bolsa_familia e auxilio_brasil;
-# a coluna programa diferencia os registros para evitar dupla contagem.
+# Em 2021-11, as linhas de bolsa_familia (média de R$ 224,38, igual à de auxilio_brasil,
+# R$ 225,12, contra ~R$ 186,66 de jan-out/2021) reproduzem a primeira folha do Auxílio
+# Brasil e são removidas pelo script para evitar dupla contagem.
+#
+# ano e mes correspondem à competência da parcela (ano_competencia/mes_competencia),
+# e não ao mês da folha de pagamento (ano_referencia/mes_referencia).
+# qtd_familias conta os NIS distintos dos titulares (famílias beneficiárias).
 #
 # O projeto usa a Base dos Dados / BigQuery porque o pacote owdbr (2019) aponta
 # para uma URL legada do Portal da Transparência bloqueada por WAF (HTTP 405) e
@@ -60,10 +73,10 @@ estados_ibge <- data.frame(
 
 colunas_saida <- c(
   "ano", "mes", "code_state", "abbrev_state", "code_muni", "name_muni",
-  "programa", "qtd_beneficiarios", "qtd_parcelas", "valor_total", "valor_medio"
+  "programa", "qtd_familias", "qtd_parcelas", "valor_total", "valor_medio"
 )
 
-# 1. CAMADA BIGQUERY (SQL, TRAVA DE CUSTO E CACHE)
+# 1. CAMADA BIGQUERY (SQL, TRAVA DE CUSTO E CACHE OPCIONAL)
 
 validar_billing_id <- function(billing_id) {
   valor <- if (is.null(billing_id) || !length(billing_id)) "" else trimws(as.character(billing_id)[1])
@@ -141,11 +154,12 @@ montar_query_bolsa_familia <- function(ano_inicial = ano_inicial_padrao) {
     "  programa,\n",
     "  sigla_uf_fonte,\n",
     "  id_municipio_fonte,\n",
-    "  COUNT(DISTINCT nis_favorecido) AS qtd_beneficiarios,\n",
+    "  COUNT(DISTINCT nis_favorecido) AS qtd_familias,\n",
     "  COUNT(*) AS qtd_parcelas,\n",
     "  SUM(valor_parcela) AS valor_total\n",
     "FROM base\n",
     "WHERE valor_parcela IS NOT NULL\n",
+    "  AND NOT (programa = 'bolsa_familia' AND ano = 2021 AND mes = 11)\n",
     "GROUP BY ano, mes, programa, sigla_uf_fonte, id_municipio_fonte"
   )
 }
@@ -176,13 +190,14 @@ baixar_resumo_bigquery <- function(
   billing_id = Sys.getenv("BILLING_ID", "seuprojeto"),
   ano_inicial = ano_inicial_padrao,
   max_bytes = limite_bytes_padrao,
-  usar_cache = TRUE,
+  usar_cache = FALSE,
   cache_path = caminho_cache_padrao(ano_inicial),
   dry_run_fn = executar_dry_run_bq,
   query_fn = executar_query_bq
 ) {
   if (isTRUE(usar_cache) && !is.null(cache_path) && file.exists(cache_path)) {
-    message("Carregando resumo agregado do cache local: ", cache_path)
+    data_cache <- format(file.info(cache_path)$mtime, "%Y-%m-%d %H:%M:%S")
+    message("Carregando resumo agregado do cache local (--usar-cache, gerado em ", data_cache, "): ", cache_path)
     return(readRDS(cache_path))
   }
 
@@ -273,10 +288,20 @@ converter_inteiro_seguro <- function(x, nome_campo) {
   as.integer(num)
 }
 
+filtrar_escopo_bolsa_familia <- function(dados, ano_inicial = ano_inicial_padrao) {
+  ano_num <- converter_inteiro_seguro(dados$ano, "ano")
+  mes_num <- converter_inteiro_seguro(dados$mes, "mes")
+  prog_txt <- trimws(as.character(dados$programa))
+  # Exclui retroativos parciais pré-2013 e a folha duplicada de bolsa_familia em 2021-11.
+  manter <- ano_num >= as.integer(ano_inicial) &
+    !(prog_txt == "bolsa_familia" & ano_num == 2021L & mes_num == 11L)
+  dados[manter, , drop = FALSE]
+}
+
 padronizar_bolsa_familia <- function(dados_brutos, municipios_geobr, ano_inicial = ano_inicial_padrao) {
   esperadas <- c(
     "ano", "mes", "programa", "sigla_uf_fonte", "id_municipio_fonte",
-    "qtd_beneficiarios", "qtd_parcelas", "valor_total"
+    "qtd_familias", "qtd_parcelas", "valor_total"
   )
   faltando <- setdiff(esperadas, names(dados_brutos))
   if (length(faltando)) {
@@ -284,9 +309,9 @@ padronizar_bolsa_familia <- function(dados_brutos, municipios_geobr, ano_inicial
   }
 
   dados <- as.data.frame(dados_brutos, stringsAsFactors = FALSE)
+  dados <- filtrar_escopo_bolsa_familia(dados, ano_inicial = ano_inicial)
   dados$ano <- converter_inteiro_seguro(dados$ano, "ano")
   dados$mes <- converter_inteiro_seguro(dados$mes, "mes")
-  dados <- dados[dados$ano >= as.integer(ano_inicial), , drop = FALSE]
 
   if (!nrow(dados)) {
     stop("Consulta bruta não retornou registros no período >= ", ano_inicial, ".", call. = FALSE)
@@ -351,7 +376,7 @@ padronizar_bolsa_familia <- function(dados_brutos, municipios_geobr, ano_inicial
     code_muni = as.integer(cod_int),
     name_muni = as.character(name_muni_final),
     programa = trimws(as.character(dados$programa)),
-    qtd_beneficiarios = para_numerico_seguro(dados$qtd_beneficiarios),
+    qtd_familias = para_numerico_seguro(dados$qtd_familias),
     qtd_parcelas = para_numerico_seguro(dados$qtd_parcelas),
     valor_total = para_numerico_seguro(dados$valor_total),
     stringsAsFactors = FALSE
@@ -361,16 +386,16 @@ padronizar_bolsa_familia <- function(dados_brutos, municipios_geobr, ano_inicial
   resultado <- preparado |>
     dplyr::group_by(ano, mes, code_state, abbrev_state, code_muni, name_muni, programa) |>
     dplyr::summarise(
-      qtd_beneficiarios = sum(qtd_beneficiarios),
+      qtd_familias = sum(qtd_familias),
       qtd_parcelas = sum(qtd_parcelas),
       valor_total = sum(valor_total),
       .groups = "drop"
     ) |>
     dplyr::mutate(
-      qtd_beneficiarios = converter_inteiro_seguro(qtd_beneficiarios, "qtd_beneficiarios"),
+      qtd_familias = converter_inteiro_seguro(qtd_familias, "qtd_familias"),
       qtd_parcelas = converter_inteiro_seguro(qtd_parcelas, "qtd_parcelas"),
       valor_total = as.double(valor_total),
-      valor_medio = ifelse(qtd_beneficiarios > 0L, valor_total / qtd_beneficiarios, NA_real_)
+      valor_medio = ifelse(qtd_familias > 0L, valor_total / qtd_familias, NA_real_)
     ) |>
     dplyr::arrange(ano, mes, code_state, code_muni, programa) |>
     dplyr::select(dplyr::all_of(colunas_saida))
@@ -434,6 +459,10 @@ validar_bolsa_familia <- function(
     stop("Registros anteriores ao ano inicial ", ano_inicial, " encontrados na tabela final.", call. = FALSE)
   }
 
+  if (any(dados_finais$programa == "bolsa_familia" & dados_finais$ano == 2021L & dados_finais$mes == 11L)) {
+    stop("Sobreposição indevida: bolsa_familia em 2021-11 deve ser excluído (duplica folha do auxilio_brasil).", call. = FALSE)
+  }
+
   conferir_calendario_mensal(dados_finais$ano, dados_finais$mes)
 
   siglas_esperadas <- estados_ibge$abbrev_state[match(dados_finais$code_state, estados_ibge$code_state)]
@@ -458,16 +487,16 @@ validar_bolsa_familia <- function(
     }
   }
 
-  if (any(dados_finais$qtd_beneficiarios <= 0L) ||
-      any(dados_finais$qtd_parcelas <= 0L) ||
-      any(dados_finais$qtd_parcelas < dados_finais$qtd_beneficiarios) ||
+  if (any(!is.finite(dados_finais$qtd_familias) | dados_finais$qtd_familias <= 0L) ||
+      any(!is.finite(dados_finais$qtd_parcelas) | dados_finais$qtd_parcelas <= 0L) ||
+      any(dados_finais$qtd_parcelas < dados_finais$qtd_familias) ||
       any(!is.finite(dados_finais$valor_total) | dados_finais$valor_total <= 0) ||
       any(!is.finite(dados_finais$valor_medio) | dados_finais$valor_medio <= 0)) {
-    stop("Valores negativos, nulos ou não finitos nas métricas financeiras ou de beneficiários.", call. = FALSE)
+    stop("Valores negativos, nulos ou não finitos nas métricas financeiras ou de famílias.", call. = FALSE)
   }
 
-  # Reconciliação contábil exata dos totais por competência e programa contra os dados brutos.
-  esperado <- dados_brutos |>
+  # Reconciliação contábil exata dos totais por competência e programa contra os dados brutos filtrados.
+  esperado <- filtrar_escopo_bolsa_familia(as.data.frame(dados_brutos, stringsAsFactors = FALSE), ano_inicial = ano_inicial) |>
     dplyr::mutate(
       ano = converter_inteiro_seguro(ano, "ano"),
       mes = converter_inteiro_seguro(mes, "mes"),
@@ -475,7 +504,6 @@ validar_bolsa_familia <- function(
       qtd_parcelas = para_numerico_seguro(qtd_parcelas),
       valor_total = para_numerico_seguro(valor_total)
     ) |>
-    dplyr::filter(ano >= as.integer(ano_inicial)) |>
     dplyr::group_by(ano, mes, programa) |>
     dplyr::summarise(
       qtd_parcelas_fonte = sum(qtd_parcelas),
@@ -540,7 +568,7 @@ fechar_conexoes_arquivo <- function(arquivo) {
 }
 
 executar <- function(args = commandArgs(trailingOnly = TRUE)) {
-  permitidos <- c("--publicar", "--sem-cache")
+  permitidos <- c("--publicar", "--usar-cache")
   if (any(!args %in% permitidos)) {
     stop("Argumento inválido: ", paste(setdiff(args, permitidos), collapse = " "), call. = FALSE)
   }
@@ -549,7 +577,7 @@ executar <- function(args = commandArgs(trailingOnly = TRUE)) {
   }
 
   deve_publicar <- "--publicar" %in% args
-  usar_cache <- !("--sem-cache" %in% args)
+  usar_cache <- "--usar-cache" %in% args
 
   pacotes <- c("bigrquery", "dplyr", "geobr", "sf", "arrow", "jsonlite")
   if (deve_publicar) {
