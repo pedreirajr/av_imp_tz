@@ -52,9 +52,10 @@ repositório guarda **apenas o código que produz os dados**, pois os
 - **Nomes de colunas** em minúsculas e no formato `snake_case`.
 - **Recorte temporal:** preferencialmente a partir de 2010, salvo
   justificativa.
-- **Formato:** Parquet (pacote `arrow`), em um único arquivo com nome
-  fixo e descritivo, sem acentos (ex.:
-  `frota_mensal_municipio.parquet`).
+- **Formato:** os dados vão em Parquet (pacote `arrow`), em um único
+  arquivo com nome fixo e descritivo, sem acentos (ex.:
+  `frota_mensal_municipio.parquet`). O dicionário não é publicado na
+  release. Ele fica no repositório, em `.md` (ver seção 5).
 
 ### 3. Checagens antes de publicar
 
@@ -125,7 +126,10 @@ Toda base publicada vem acompanhada de dois arquivos, ambos com o
 
 #### 5.1 Dicionário (`scripts_dados/dics/`)
 
-Descreve o arquivo publicado, para quem vai usá-lo sem ler o script:
+Descreve o arquivo publicado, para quem vai usá-lo sem ler o script. O
+dicionário fica no repositório, como texto (`.md`, `.Rmd` ou `.qmd`), e
+não deve ser publicado como asset na release (nem em `.xlsx`, `.csv` ou
+Parquet). Ele deve trazer:
 
 - nome do asset na release, nível (ex.: município × ano × mês) e chave
   única da tabela;
@@ -136,7 +140,11 @@ Descreve o arquivo publicado, para quem vai usá-lo sem ler o script:
   colunas categóricas, liste as categorias e o que significam);
 - significado de `NA` e de códigos especiais em cada coluna (ex.:
   `code_state = 99` e `abbrev_state = "NI"` para UF não identificada no
-  CAGED).
+  CAGED);
+- quando a fonte identifica as variáveis por códigos (ex.: `Mtra01`,
+  `Mtra02`, … na MUNIC), uma tabela com o código e a descrição de cada
+  variável, separada por ano ou edição se o significado de um código
+  mudar ao longo do tempo.
 
 Exemplo de tabela:
 
