@@ -2,15 +2,23 @@
 # Gera bolsa_familia_mensal_municipio.parquet em tempdir() durante a sessão R.
 # Publicar e apagar o temporário: Rscript scripts_dados/bolsa_familia.R --publicar
 # Forçar nova consulta no BigQuery ignorando cache local: --sem-cache
-# Dependências: bigrquery, dplyr, geobr, arrow, jsonlite;
+# Dependências: bigrquery, dplyr, geobr, sf, arrow, jsonlite;
 # Publicação: piggyback, gh e httr, com autenticação do GitHub.
 #
 # Pagamentos mensais do Bolsa Família e do Auxílio Brasil por município a partir
 # da tabela tratada da CGU / Portal da Transparência na Base dos Dados
 # (basedosdados.br_cgu_beneficios_cidadao):
-# - bolsa_familia_pagamento (2013-01 a 2021-11)
-# - auxilio_brasil (2021-11 a 2023-02, Lei n. 14.284/2021)
-# - novo_bolsa_familia (2023-03 em diante, Lei n. 14.601/2023)
+# - bolsa_familia_pagamento (competências completas de 2013-01 a 2021-11)
+# - auxilio_brasil (competências completas de 2021-11 a 2023-02, Lei n. 14.284/2021;
+#   inclui parcelas retroativas de 2020-08 e 2021-03 a 2021-10)
+# - novo_bolsa_familia (competências completas a partir de 2023-03, Lei n. 14.601/2023;
+#   na camada aberta da Base dos Dados, disponível até 2026-04 devido a Row-Level Security)
+#
+# A série inicia em 2013-01 porque a CGU passou a disponibilizar as folhas mensais
+# nesse período; parcelas retroativas de 2012-02 a 2012-12 pagas na folha de 2013
+# são parciais (82 a 3.936 municípios) e ficam fora do corte >= 2013.
+# Em 2021-11 há sobreposição de competência entre bolsa_familia e auxilio_brasil;
+# a coluna programa diferencia os registros para evitar dupla contagem.
 #
 # O projeto usa a Base dos Dados / BigQuery porque o pacote owdbr (2019) aponta
 # para uma URL legada do Portal da Transparência bloqueada por WAF (HTTP 405) e
@@ -20,7 +28,7 @@
 # Configure BILLING_ID no arquivo .Renviron na raiz do projeto (nunca versionado)
 # com o ID do seu projeto Google Cloud (BigQuery Sandbox ou conta gratuita, cota
 # mensal de 1 TB). Antes de executar qualquer query real, o script executa um
-# dry-run gratuito e bloqueia a execução se a estimativa ultrapassar 250 GB.
+# dry-run gratuito e impõe trava de 250 GB no cliente e no servidor (maximumBytesBilled).
 #
 # Fonte oficial primária: https://portaldatransparencia.gov.br/download-de-dados/novo-bolsa-familia
 # Catálogo Base dos Dados: https://basedosdados.org/dataset/br-cgu-beneficios-cidadao
@@ -28,7 +36,7 @@
 repo <- "pedreirajr/av_imp_tz"
 release_tag <- "data"
 asset_nome <- "bolsa_familia_mensal_municipio.parquet"
-ano_inicial_padrao <- 2010L
+ano_inicial_padrao <- 2013L
 limite_bytes_padrao <- 250 * 1024^3 # 250 GB (limite de segurança dentro de 1 TB/mês gratuito)
 
 tabelas_pbf <- c(
@@ -161,7 +169,7 @@ executar_query_bq <- function(sql, billing_id, max_bytes = limite_bytes_padrao) 
       )
     )
   )
-  bigrquery::bq_table_download(tabela_tmp, bigint = "integer64")
+  bigrquery::bq_table_download(tabela_tmp, bigint = "numeric")
 }
 
 baixar_resumo_bigquery <- function(
@@ -181,14 +189,21 @@ baixar_resumo_bigquery <- function(
   billing <- validar_billing_id(billing_id)
   sql <- montar_query_bolsa_familia(ano_inicial = ano_inicial)
 
-  message("Executando dry-run gratuito no BigQuery para validar volume de bytes...")
+  message("Executando dry-run gratuito no BigQuery para validar sintaxe e volume de bytes...")
   bytes_estimados <- dry_run_fn(sql, billing)
-  verificar_limite_bytes(bytes_estimados, max_bytes = max_bytes)
-  message(sprintf(
-    "Dry-run aprovado: %.2f GB estimados (limite: %.2f GB).",
-    bytes_estimados / (1024^3),
-    max_bytes / (1024^3)
-  ))
+  if (length(bytes_estimados) == 0L) {
+    message(sprintf(
+      "Dry-run aprovado (estimativa de bytes omitida pelo BigQuery por Row-Level Security; trava server-side ativa em %.2f GB).",
+      max_bytes / (1024^3)
+    ))
+  } else {
+    verificar_limite_bytes(bytes_estimados, max_bytes = max_bytes)
+    message(sprintf(
+      "Dry-run aprovado: %.2f GB estimados (limite: %.2f GB).",
+      bytes_estimados / (1024^3),
+      max_bytes / (1024^3)
+    ))
+  }
 
   dados_brutos <- query_fn(sql, billing, max_bytes = max_bytes)
 
@@ -204,13 +219,27 @@ baixar_resumo_bigquery <- function(
 
 obter_referencia_geobr <- function() {
   message("Carregando tabela de referência municipal do geobr (2022)...")
-  muni <- geobr::lookup_muni(year = 2022, name_muni = "all") |>
+  # read_municipality(2022) traz Fernando de Noronha (2605459), ausente em lookup_muni(2022);
+  # lookup_muni(2022) traz Boa Esperança do Norte (5101837), ausente em read_municipality(2022).
+  # A união dos dois garante cobertura completa das 5.571 unidades oficiais do geobr.
+  malha <- geobr::read_municipality(year = 2022, simplified = TRUE, showProgress = FALSE) |>
+    sf::st_drop_geometry() |>
     dplyr::transmute(
       code_muni = as.integer(code_muni),
       name_muni = as.character(name_muni),
       abbrev_state = as.character(abbrev_state),
       code_state = as.integer(code_state)
-    ) |>
+    )
+
+  tabela <- geobr::lookup_muni(year = 2022, name_muni = "all") |>
+    dplyr::transmute(
+      code_muni = as.integer(code_muni),
+      name_muni = as.character(name_muni),
+      abbrev_state = as.character(abbrev_state),
+      code_state = as.integer(code_state)
+    )
+
+  muni <- dplyr::bind_rows(malha, tabela) |>
     dplyr::distinct(code_muni, .keep_all = TRUE)
 
   if (nrow(muni) < 5570L || anyNA(muni) || anyDuplicated(muni$code_muni) ||
@@ -225,8 +254,18 @@ codigo_municipio_ausente <- function(x) {
   is.na(limpo) | limpo %in% c("", "0", "000000", "0000000", "999999", "9999999")
 }
 
+para_numerico_seguro <- function(x) {
+  if (inherits(x, "integer64")) {
+    if (!requireNamespace("bit64", quietly = TRUE)) {
+      stop("Instale o pacote bit64 para converter colunas integer64.", call. = FALSE)
+    }
+    return(as.double(x))
+  }
+  suppressWarnings(as.numeric(x))
+}
+
 converter_inteiro_seguro <- function(x, nome_campo) {
-  num <- suppressWarnings(as.numeric(x))
+  num <- para_numerico_seguro(x)
   if (anyNA(num) || any(!is.finite(num)) || any(num != floor(num)) ||
       any(num > .Machine$integer.max) || any(num < -.Machine$integer.max)) {
     stop("Valores inválidos para conversão inteira em ", nome_campo, ".", call. = FALSE)
@@ -234,7 +273,7 @@ converter_inteiro_seguro <- function(x, nome_campo) {
   as.integer(num)
 }
 
-padronizar_bolsa_familia <- function(dados_brutos, municipios_geobr) {
+padronizar_bolsa_familia <- function(dados_brutos, municipios_geobr, ano_inicial = ano_inicial_padrao) {
   esperadas <- c(
     "ano", "mes", "programa", "sigla_uf_fonte", "id_municipio_fonte",
     "qtd_beneficiarios", "qtd_parcelas", "valor_total"
@@ -245,8 +284,12 @@ padronizar_bolsa_familia <- function(dados_brutos, municipios_geobr) {
   }
 
   dados <- as.data.frame(dados_brutos, stringsAsFactors = FALSE)
+  dados$ano <- converter_inteiro_seguro(dados$ano, "ano")
+  dados$mes <- converter_inteiro_seguro(dados$mes, "mes")
+  dados <- dados[dados$ano >= as.integer(ano_inicial), , drop = FALSE]
+
   if (!nrow(dados)) {
-    stop("Consulta bruta não retornou registros.", call. = FALSE)
+    stop("Consulta bruta não retornou registros no período >= ", ano_inicial, ".", call. = FALSE)
   }
 
   cod_txt <- trimws(as.character(dados$id_municipio_fonte))
@@ -301,16 +344,16 @@ padronizar_bolsa_familia <- function(dados_brutos, municipios_geobr) {
   }
 
   preparado <- data.frame(
-    ano = converter_inteiro_seguro(dados$ano, "ano"),
-    mes = converter_inteiro_seguro(dados$mes, "mes"),
+    ano = dados$ano,
+    mes = dados$mes,
     code_state = as.integer(code_state_final),
     abbrev_state = as.character(abbrev_state_final),
     code_muni = as.integer(cod_int),
     name_muni = as.character(name_muni_final),
     programa = trimws(as.character(dados$programa)),
-    qtd_beneficiarios = as.numeric(dados$qtd_beneficiarios),
-    qtd_parcelas = as.numeric(dados$qtd_parcelas),
-    valor_total = as.numeric(dados$valor_total),
+    qtd_beneficiarios = para_numerico_seguro(dados$qtd_beneficiarios),
+    qtd_parcelas = para_numerico_seguro(dados$qtd_parcelas),
+    valor_total = para_numerico_seguro(dados$valor_total),
     stringsAsFactors = FALSE
   )
 
@@ -359,7 +402,13 @@ conferir_calendario_mensal <- function(anos, meses) {
   invisible(TRUE)
 }
 
-validar_bolsa_familia <- function(dados_finais, dados_brutos, municipios_geobr, exigir_27_ufs = TRUE) {
+validar_bolsa_familia <- function(
+  dados_finais,
+  dados_brutos,
+  municipios_geobr,
+  exigir_27_ufs = TRUE,
+  ano_inicial = ano_inicial_padrao
+) {
   if (!nrow(dados_finais)) {
     stop("Tabela final está vazia.", call. = FALSE)
   }
@@ -379,6 +428,10 @@ validar_bolsa_familia <- function(dados_finais, dados_brutos, municipios_geobr, 
 
   if (any(!dados_finais$programa %in% names(tabelas_pbf))) {
     stop("Valores inválidos na coluna programa.", call. = FALSE)
+  }
+
+  if (any(dados_finais$ano < as.integer(ano_inicial))) {
+    stop("Registros anteriores ao ano inicial ", ano_inicial, " encontrados na tabela final.", call. = FALSE)
   }
 
   conferir_calendario_mensal(dados_finais$ano, dados_finais$mes)
@@ -416,12 +469,13 @@ validar_bolsa_familia <- function(dados_finais, dados_brutos, municipios_geobr, 
   # Reconciliação contábil exata dos totais por competência e programa contra os dados brutos.
   esperado <- dados_brutos |>
     dplyr::mutate(
-      ano = as.integer(ano),
-      mes = as.integer(mes),
+      ano = converter_inteiro_seguro(ano, "ano"),
+      mes = converter_inteiro_seguro(mes, "mes"),
       programa = trimws(as.character(programa)),
-      qtd_parcelas = as.numeric(qtd_parcelas),
-      valor_total = as.numeric(valor_total)
+      qtd_parcelas = para_numerico_seguro(qtd_parcelas),
+      valor_total = para_numerico_seguro(valor_total)
     ) |>
+    dplyr::filter(ano >= as.integer(ano_inicial)) |>
     dplyr::group_by(ano, mes, programa) |>
     dplyr::summarise(
       qtd_parcelas_fonte = sum(qtd_parcelas),
@@ -497,7 +551,7 @@ executar <- function(args = commandArgs(trailingOnly = TRUE)) {
   deve_publicar <- "--publicar" %in% args
   usar_cache <- !("--sem-cache" %in% args)
 
-  pacotes <- c("bigrquery", "dplyr", "geobr", "arrow", "jsonlite")
+  pacotes <- c("bigrquery", "dplyr", "geobr", "sf", "arrow", "jsonlite")
   if (deve_publicar) {
     pacotes <- c(pacotes, "piggyback", "gh", "httr")
   }

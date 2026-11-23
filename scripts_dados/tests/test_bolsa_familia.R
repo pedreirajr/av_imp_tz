@@ -12,10 +12,10 @@ script <- if (file.exists("../bolsa_familia.R")) {
 source(script, encoding = "UTF-8")
 
 municipios_ref <- data.frame(
-  code_muni = c(1200401L, 2927408L, 3550308L),
-  name_muni = c("Rio Branco", "Salvador", "São Paulo"),
-  abbrev_state = c("AC", "BA", "SP"),
-  code_state = c(12L, 29L, 35L),
+  code_muni = c(1200401L, 2605459L, 2927408L, 3550308L),
+  name_muni = c("Rio Branco", "Fernando de Noronha", "Salvador", "São Paulo"),
+  abbrev_state = c("AC", "PE", "BA", "SP"),
+  code_state = c(12L, 26L, 29L, 35L),
   stringsAsFactors = FALSE
 )
 
@@ -32,7 +32,7 @@ brutos_exemplo <- data.frame(
 )
 
 test_that("montar_query_bolsa_familia gera SQL com as 3 tabelas e métricas esperadas", {
-  sql <- montar_query_bolsa_familia(ano_inicial = 2010L)
+  sql <- montar_query_bolsa_familia(ano_inicial = 2013L)
   expect_type(sql, "character")
   expect_length(sql, 1L)
   expect_match(sql, "basedosdados\\.br_cgu_beneficios_cidadao\\.bolsa_familia_pagamento")
@@ -45,7 +45,7 @@ test_that("montar_query_bolsa_familia gera SQL com as 3 tabelas e métricas espe
   expect_match(sql, "COUNT\\(\\*\\) AS qtd_parcelas")
   expect_match(sql, "SUM\\(valor_parcela\\) AS valor_total")
   expect_match(sql, "GROUP BY ano, mes, programa, sigla_uf_fonte, id_municipio_fonte")
-  expect_match(sql, ">= 2010")
+  expect_match(sql, ">= 2013")
   expect_error(montar_query_bolsa_familia(2002L), "ano_inicial")
 })
 
@@ -57,7 +57,7 @@ test_that("validar_billing_id rejeita placeholder e valores vazios", {
   expect_error(validar_billing_id(NA_character_), "BILLING_ID.*\\.Renviron")
 })
 
-test_that("verificar_limite_bytes e baixar_resumo_bigquery aplicam trava de custo e cache", {
+test_that("verificar_limite_bytes e baixar_resumo_bigquery aplicam trava de custo, RLS e cache", {
   limite <- 250 * 1024^3
   expect_true(verificar_limite_bytes(100 * 1024^3, max_bytes = limite))
   expect_true(verificar_limite_bytes(limite, max_bytes = limite))
@@ -88,6 +88,22 @@ test_that("verificar_limite_bytes e baixar_resumo_bigquery aplicam trava de cust
   )
   expect_equal(chamadas_query, 0L)
   expect_false(file.exists(cache_tmp))
+
+  # Quando BigQuery omite estimativa por Row-Level Security (numeric(0)), segue com max_bytes server-side.
+  limite_repassado <- NA_real_
+  res_rls <- baixar_resumo_bigquery(
+    billing_id = "ee-thomasbarros",
+    max_bytes = 250 * 1024^3,
+    usar_cache = FALSE,
+    cache_path = NULL,
+    dry_run_fn = function(sql, billing) numeric(0),
+    query_fn = function(sql, billing, max_bytes) {
+      limite_repassado <<- max_bytes
+      brutos_exemplo
+    }
+  )
+  expect_equal(limite_repassado, 250 * 1024^3)
+  expect_equal(res_rls, brutos_exemplo)
 
   res1 <- baixar_resumo_bigquery(
     billing_id = "ee-thomasbarros",
@@ -153,6 +169,37 @@ test_that("padronizar_bolsa_familia aplica esquema geobr e preserva localizaçõ
 
   expect_equal(sum(resultado$valor_total), sum(brutos_exemplo$valor_total))
   expect_silent(validar_bolsa_familia(resultado, brutos_exemplo, municipios_ref, exigir_27_ufs = FALSE))
+})
+
+test_that("padronizar_bolsa_familia trata retroativos pré-2013, Fernando de Noronha, sobreposição 2021-11 e integer64", {
+  skip_if_not_installed("bit64")
+  dados_reais_padrao <- data.frame(
+    ano = bit64::as.integer64(c(2012L, 2021L, 2021L, 2021L)),
+    mes = bit64::as.integer64(c(12L, 11L, 11L, 11L)),
+    programa = c("bolsa_familia", "bolsa_familia", "auxilio_brasil", "novo_bolsa_familia"),
+    sigla_uf_fonte = c("PE", "PE", "PE", "MT"),
+    id_municipio_fonte = c("2605459", "2605459", "2605459", NA_character_),
+    qtd_beneficiarios = bit64::as.integer64(c(5L, 17L, 15L, 24L)),
+    qtd_parcelas = bit64::as.integer64(c(5L, 17L, 16L, 24L)),
+    valor_total = c(1000, 4000, 3800, 15248),
+    stringsAsFactors = FALSE
+  )
+
+  resultado <- padronizar_bolsa_familia(dados_reais_padrao, municipios_ref, ano_inicial = 2013L)
+  expect_equal(nrow(resultado), 3L)
+  expect_true(all(resultado$ano == 2021L))
+  expect_equal(sum(resultado$code_muni == 2605459L, na.rm = TRUE), 2L)
+  expect_equal(unique(resultado$name_muni[!is.na(resultado$code_muni)]), "Fernando de Noronha")
+
+  mt_na <- subset(resultado, code_state == 51L)
+  expect_equal(mt_na$abbrev_state, "MT")
+  expect_true(is.na(mt_na$code_muni))
+  expect_true(is.na(mt_na$name_muni))
+  expect_equal(mt_na$valor_total, 15248)
+
+  expect_silent(validar_bolsa_familia(
+    resultado, dados_reais_padrao, municipios_ref, exigir_27_ufs = FALSE, ano_inicial = 2013L
+  ))
 })
 
 test_that("padronizar_bolsa_familia rejeita códigos IBGE inválidos ou incompatíveis com a UF", {
