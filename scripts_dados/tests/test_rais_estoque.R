@@ -107,3 +107,216 @@ test_that("baixar_resumo_rais_bigquery consulta por padrão e usa cache somente 
   )
   expect_identical(res_cache$vinculos_ativos, 99L)
 })
+
+municipios_mock <- data.frame(
+  code_muni = c(1200401L, 2605459L, 2927408L, 3550308L, 5101837L),
+  name_muni = c("Rio Branco", "Fernando de Noronha", "Salvador", "São Paulo", "Boa Esperança do Norte"),
+  abbrev_state = c("AC", "PE", "BA", "SP", "MT"),
+  code_state = c(12L, 26L, 29L, 35L, 51L),
+  stringsAsFactors = FALSE
+)
+
+brutos_mock <- data.frame(
+  ano = c(2008L, 2009L, 2009L, 2009L, 2009L, 2009L, 2010L, 2010L),
+  sigla_uf_fonte = c("AC", "AC", "PE", "SP", "MT", NA, "BA", "SP"),
+  id_municipio_fonte = c("1200401", "1200401", "260545", "359999", "5101837", "{ñ class}", "2927408", "3550308"),
+  vinculos_ativos = c(500, 1200, 350, 42, 0, 15, 8000, 25000),
+  stringsAsFactors = FALSE
+)
+
+test_that("padronizar_rais_estoque reconcilia 6 e 7 dígitos no geobr, filtra >= 2009 e preserva 0 e NA", {
+  res <- padronizar_rais_estoque(brutos_mock, municipios_mock, ano_inicial = 2009L)
+
+  expect_identical(
+    names(res),
+    c("ano", "code_state", "abbrev_state", "code_muni", "name_muni", "vinculos_ativos")
+  )
+  expect_type(res$ano, "integer")
+  expect_type(res$code_state, "integer")
+  expect_type(res$abbrev_state, "character")
+  expect_type(res$code_muni, "integer")
+  expect_type(res$name_muni, "character")
+  expect_type(res$vinculos_ativos, "integer")
+  expect_true(all(res$ano >= 2009L))
+
+  fn <- subset(res, code_muni == 2605459L)
+  expect_identical(nrow(fn), 1L)
+  expect_identical(fn$name_muni, "Fernando de Noronha")
+  expect_identical(fn$code_state, 26L)
+  expect_identical(fn$vinculos_ativos, 350L)
+
+  zero_row <- subset(res, code_muni == 5101837L)
+  expect_identical(zero_row$vinculos_ativos, 0L)
+  expect_identical(zero_row$name_muni, "Boa Esperança do Norte")
+
+  sp_ign <- subset(res, ano == 2009L & code_state == 35L)
+  expect_identical(nrow(sp_ign), 1L)
+  expect_true(is.na(sp_ign$code_muni))
+  expect_true(is.na(sp_ign$name_muni))
+  expect_identical(sp_ign$abbrev_state, "SP")
+  expect_identical(sp_ign$vinculos_ativos, 42L)
+
+  ni_row <- subset(res, code_state == 99L)
+  expect_identical(nrow(ni_row), 1L)
+  expect_identical(ni_row$abbrev_state, "NI")
+  expect_true(is.na(ni_row$code_muni))
+  expect_true(is.na(ni_row$name_muni))
+  expect_identical(ni_row$vinculos_ativos, 15L)
+
+  expect_true(validar_rais_estoque(res, brutos_mock, municipios_mock, exigir_27_ufs = FALSE))
+})
+
+test_that("padronizar_rais_estoque consolida múltiplas sentinelas de município ausente e converte integer64", {
+  skip_if_not_installed("bit64")
+  brutos_sent <- data.frame(
+    ano = c(2009L, 2009L, 2009L, 2009L),
+    sigla_uf_fonte = c("SP", "SP", "SP", ""),
+    id_municipio_fonte = c("", "0000000", "359999", "9999999"),
+    vinculos_ativos = bit64::as.integer64(c(10, 20, 30, 5)),
+    stringsAsFactors = FALSE
+  )
+  res <- padronizar_rais_estoque(brutos_sent, municipios_mock, ano_inicial = 2009L)
+
+  expect_identical(nrow(res), 2L)
+  expect_identical(subset(res, code_state == 35L)$vinculos_ativos, 60L)
+  expect_identical(subset(res, code_state == 99L)$vinculos_ativos, 5L)
+  expect_true(validar_rais_estoque(res, brutos_sent, municipios_mock, exigir_27_ufs = FALSE))
+})
+
+test_that("padronizar_rais_estoque rejeita códigos IBGE inválidos, inexistentes ou incompatíveis com UF", {
+  invalido_fmt <- data.frame(
+    ano = 2009L, sigla_uf_fonte = "BA", id_municipio_fonte = "29274", vinculos_ativos = 10L,
+    stringsAsFactors = FALSE
+  )
+  expect_error(padronizar_rais_estoque(invalido_fmt, municipios_mock), "formato inválido")
+
+  inexistente <- data.frame(
+    ano = 2009L, sigla_uf_fonte = "BA", id_municipio_fonte = "2999991", vinculos_ativos = 10L,
+    stringsAsFactors = FALSE
+  )
+  expect_error(padronizar_rais_estoque(inexistente, municipios_mock), "ausente no geobr")
+
+  uf_errada <- data.frame(
+    ano = 2009L, sigla_uf_fonte = "SP", id_municipio_fonte = "2927408", vinculos_ativos = 10L,
+    stringsAsFactors = FALSE
+  )
+  expect_error(padronizar_rais_estoque(uf_errada, municipios_mock), "Inconsistência geográfica")
+})
+
+test_that("validar_rais_estoque barra duplicatas, negativos, buraco anual, UF faltante e erro de reconciliação", {
+  res <- padronizar_rais_estoque(brutos_mock, municipios_mock, ano_inicial = 2009L)
+
+  expect_error(
+    validar_rais_estoque(rbind(res, res[1, ]), brutos_mock, municipios_mock, exigir_27_ufs = FALSE),
+    "duplicad"
+  )
+
+  neg <- res
+  neg$vinculos_ativos[1] <- -1L
+  expect_error(
+    validar_rais_estoque(neg, brutos_mock, municipios_mock, exigir_27_ufs = FALSE),
+    "negativ"
+  )
+
+  na_val <- res
+  na_val$vinculos_ativos[1] <- NA_integer_
+  expect_error(
+    validar_rais_estoque(na_val, brutos_mock, municipios_mock, exigir_27_ufs = FALSE),
+    "ausent"
+  )
+
+  buraco_brutos <- data.frame(
+    ano = c(2009L, 2011L),
+    sigla_uf_fonte = c("AC", "AC"),
+    id_municipio_fonte = c("1200401", "1200401"),
+    vinculos_ativos = c(100L, 120L),
+    stringsAsFactors = FALSE
+  )
+  buraco_res <- padronizar_rais_estoque(buraco_brutos, municipios_mock, ano_inicial = 2009L)
+  expect_error(
+    validar_rais_estoque(buraco_res, buraco_brutos, municipios_mock, exigir_27_ufs = FALSE),
+    "Anos ausentes"
+  )
+
+  expect_error(
+    validar_rais_estoque(res, brutos_mock, municipios_mock, exigir_27_ufs = TRUE),
+    "UFs ausentes"
+  )
+
+  divergente <- res
+  divergente$vinculos_ativos[1] <- divergente$vinculos_ativos[1] + 1L
+  expect_error(
+    validar_rais_estoque(divergente, brutos_mock, municipios_mock, exigir_27_ufs = FALSE),
+    "Totais reconciliados"
+  )
+
+  nome_errado <- res
+  nome_errado$name_muni[1] <- "Nome Inventado"
+  expect_error(
+    validar_rais_estoque(nome_errado, brutos_mock, municipios_mock, exigir_27_ufs = FALSE),
+    "geográficos municipais"
+  )
+})
+
+test_that("preparar_asset escreve Parquet válido exclusivamente em tempdir()", {
+  res <- padronizar_rais_estoque(brutos_mock, municipios_mock, ano_inicial = 2009L)
+  caminho <- preparar_asset(res)
+  on.exit(unlink(caminho), add = TRUE)
+
+  expect_identical(basename(caminho), "rais_estoque_anual_municipio.parquet")
+  expect_identical(
+    normalizePath(dirname(caminho), winslash = "/"),
+    normalizePath(tempdir(), winslash = "/")
+  )
+  expect_true(file.exists(caminho))
+
+  lido <- arrow::read_parquet(caminho)
+  expect_identical(nrow(lido), nrow(res))
+  expect_identical(names(lido), names(res))
+  expect_identical(as.integer(lido$vinculos_ativos), as.integer(res$vinculos_ativos))
+})
+
+test_that("executar rejeita argumentos inválidos e apaga Parquet temporário em --publicar mesmo sob falha", {
+  expect_error(executar(c("--invalido")), "Argumento inválido")
+
+  skip_if_not_installed("bigrquery")
+  skip_if_not_installed("piggyback")
+  skip_if_not_installed("gh")
+  skip_if_not_installed("httr")
+
+  env_orig <- list(
+    baixar = baixar_resumo_rais_bigquery,
+    geobr = obter_referencia_geobr,
+    validar = validar_rais_estoque,
+    publicar = publicar_asset
+  )
+  on.exit({
+    assign("baixar_resumo_rais_bigquery", env_orig$baixar, envir = .GlobalEnv)
+    assign("obter_referencia_geobr", env_orig$geobr, envir = .GlobalEnv)
+    assign("validar_rais_estoque", env_orig$validar, envir = .GlobalEnv)
+    assign("publicar_asset", env_orig$publicar, envir = .GlobalEnv)
+  }, add = TRUE)
+
+  usar_cache_recebido <- NA
+  assign("baixar_resumo_rais_bigquery", function(usar_cache = FALSE, ...) {
+    usar_cache_recebido <<- usar_cache
+    brutos_mock
+  }, envir = .GlobalEnv)
+  assign("obter_referencia_geobr", function() municipios_mock, envir = .GlobalEnv)
+  assign("validar_rais_estoque", function(dados_finais, dados_brutos, municipios_geobr, ...) {
+    env_orig$validar(dados_finais, dados_brutos, municipios_geobr, exigir_27_ufs = FALSE)
+  }, envir = .GlobalEnv)
+  assign("publicar_asset", function(arquivo) stop("falha simulada de upload"), envir = .GlobalEnv)
+
+  destino <- file.path(tempdir(), asset_nome)
+  unlink(destino)
+
+  expect_error(executar(c("--publicar")), "falha simulada de upload")
+  expect_false(usar_cache_recebido)
+  expect_false(file.exists(destino))
+
+  arq_local <- executar(c("--usar-cache"))
+  on.exit(unlink(arq_local), add = TRUE)
+  expect_true(usar_cache_recebido)
+  expect_true(file.exists(arq_local))
+})
