@@ -320,3 +320,42 @@ test_that("executar rejeita argumentos inválidos e apaga Parquet temporário em
   expect_true(usar_cache_recebido)
   expect_true(file.exists(arq_local))
 })
+
+test_that("regressão da auditoria real: zeros observados, ausências sem preenchimento, NI e 5.571 municípios", {
+  municipios_audit <- data.frame(
+    code_muni = c(2106359L, 2111672L, 2204550L, 2605459L, 5101837L),
+    name_muni = c(
+      "Marajá do Sena", "São Roberto", "Guaribas",
+      "Fernando de Noronha", "Boa Esperança do Norte"
+    ),
+    abbrev_state = c("MA", "MA", "PI", "PE", "MT"),
+    code_state = c(21L, 21L, 22L, 26L, 51L),
+    stringsAsFactors = FALSE
+  )
+
+  # Espelha achados auditados em 2009-2025:
+  # - São Roberto (2111672) ausente na fonte em 2009 e presente a partir de 2010
+  # - Guaribas (2204550) com 0 vínculos ativos observados em 2010
+  # - Marajá do Sena (2106359) com 0 vínculos ativos observados em 2015 (aqui 2011 na sequência)
+  # - Fernando de Noronha (2605459) presente em todos os anos e Boa Esperança do Norte (5101837) em 2011
+  # - Registro NI (sigla_uf = NA, id_municipio = "999999") preservado como 99/"NI" com 3066 vínculos
+  brutos_audit <- data.frame(
+    ano = c(2009L, 2009L, 2010L, 2010L, 2010L, 2011L, 2011L, 2011L, 2011L),
+    sigla_uf_fonte = c("PE", "PI", "MA", "PI", "PE", "MA", "PE", "MT", NA),
+    id_municipio_fonte = c("2605459", "2204550", "2111672", "2204550", "2605459", "2106359", "2605459", "5101837", "999999"),
+    vinculos_ativos = c(1025L, 120L, 180L, 0L, 1049L, 0L, 1102L, 143L, 3066L),
+    stringsAsFactors = FALSE
+  )
+
+  res <- padronizar_rais_estoque(brutos_audit, municipios_audit, ano_inicial = 2009L)
+
+  expect_identical(nrow(res), 9L)
+  expect_identical(nrow(subset(res, ano == 2009L & code_muni == 2111672L)), 0L)
+  expect_identical(subset(res, ano == 2010L & code_muni == 2204550L)$vinculos_ativos, 0L)
+  expect_identical(subset(res, ano == 2011L & code_muni == 2106359L)$vinculos_ativos, 0L)
+  expect_identical(subset(res, ano == 2011L & code_muni == 5101837L)$vinculos_ativos, 143L)
+  expect_identical(subset(res, ano == 2011L & code_state == 99L)$abbrev_state, "NI")
+  expect_identical(subset(res, ano == 2011L & code_state == 99L)$vinculos_ativos, 3066L)
+  expect_true(is.na(subset(res, ano == 2011L & code_state == 99L)$code_muni))
+  expect_true(validar_rais_estoque(res, brutos_audit, municipios_audit, exigir_27_ufs = FALSE))
+})
